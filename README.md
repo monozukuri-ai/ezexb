@@ -22,7 +22,7 @@ To build from a source checkout, install Rust 1.83 or newer and run:
 python -m pip install .
 ```
 
-Prebuilt release wheels target Linux x86_64 (glibc 2.28+), Windows x86_64, and
+Prebuilt release wheels target Linux x86_64 and aarch64 (glibc 2.28+), Windows x86_64, and
 macOS Intel / Apple silicon. A source install requires a Rust toolchain.
 See [development](https://github.com/monozukuri-ai/ezexb/blob/main/docs/development.md) for an editable installation and tests.
 

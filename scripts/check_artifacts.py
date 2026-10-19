@@ -69,6 +69,7 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
     if release:
         patterns = (
             r"manylinux_2_28_x86_64",
+            r"manylinux_2_28_aarch64",
             r"macosx_\d+_\d+_x86_64",
             r"macosx_\d+_\d+_arm64",
             r"win_amd64",

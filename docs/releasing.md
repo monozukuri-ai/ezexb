@@ -14,7 +14,7 @@ The release bundle must contain exactly one sdist and four `cp310-abi3` wheels:
 
 | Platform | Target |
 | --- | --- |
-| Linux, glibc 2.28+ | x86_64 |
+| Linux, glibc 2.28+ | x86_64, aarch64 |
 | Windows | x86_64 |
 | macOS | x86_64 |
 | macOS | arm64 |
