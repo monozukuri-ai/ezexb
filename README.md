@@ -79,16 +79,20 @@ JSON report in automation. Extraction commands refuse to overwrite existing file
 
 | Area | Available data |
 | --- | --- |
-| Geometry | LINE, CIRCLE, ARC, POLYLINE, stored NURBS and ELLIPSE parameters |
+| Geometry | POINT, LINE, CIRCLE, ARC, POLYLINE, stored NURBS and ELLIPSE parameters |
 | Text and blocks | TEXT, INSERT, attached attributes, attribute definitions |
-| Fills and dimensions | HATCH/SOLID boundaries and parameters; stored data and presentation for five dimension types |
+| Fills and dimensions | HATCH/SOLID boundaries and parameters; stored data and presentation for eleven dimension types |
+| Symbols and callouts | Selected roughness, geometric-tolerance, section and datum fields; part-number records and nested item presentations |
+| Tables and views | Stored general/hole-chart cells and layout, BOM header/row presentations, 2D view references and circular clips |
 | Context | Layers, linetypes, text styles, spaces and blocks |
 | Inspection | CFB streams, metadata, embedded BMP, decoded payloads and record headers |
 
-Support depends on the exact layout and build profile. Dimension construction
-and associativity, physical units, external references, native font layout and
+Support depends on the exact layout and build profile. Dimension/symbol construction,
+table/style resolution and regeneration, view placement/clipping, associativity, physical units,
+external references, native font layout and
 complete rendering remain unsupported. SVG uses approximate text and strokes;
-it does not regenerate hatch fills. Writing and DXF export are not provided.
+it does not regenerate hatch fills. A qualified zero-radius ARC pattern is retained as
+`DegenerateArc` with a diagnostic and is not drawn. Writing and DXF export are not provided.
 
 ## Documentation
 

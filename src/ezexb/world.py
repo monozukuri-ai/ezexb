@@ -11,6 +11,7 @@ from .document import (
     Circle,
     Diagnostic,
     Line,
+    Point,
     ResolvedStyle,
     StyleValue,
     _convert,
@@ -34,7 +35,7 @@ class EllipticCurve:
     kind: Literal["EllipticCurve"] = "EllipticCurve"
 
 
-WorldCurve = Line | Circle | Arc | EllipticCurve
+WorldCurve = Point | Line | Circle | Arc | EllipticCurve
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,14 @@ def _curve(value: dict) -> WorldCurve | WorldPolyline:
         if key in value:
             value[key] = tuple(value[key])
     return _convert(
-        {"Line": Line, "Circle": Circle, "Arc": Arc, "EllipticCurve": EllipticCurve}[kind], value
+        {
+            "Point": Point,
+            "Line": Line,
+            "Circle": Circle,
+            "Arc": Arc,
+            "EllipticCurve": EllipticCurve,
+        }[kind],
+        value,
     )
 
 

@@ -7,6 +7,7 @@ use crate::{RecordHeader, RecordProfile, SourceSpan};
 const LINE: &str = "17ecf72d-c046-4e9a-8416-fd8220fd33b5";
 const CIRCLE: &str = "7587733c-3df6-4c9d-8b08-20aeffe18291";
 const ARC: &str = "91d6556b-0fb8-4e13-998f-bdacbfd31025";
+const POINT: &str = "d6da372e-0f4f-4bfb-9e92-3b3363ac6c22";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EntityAttributes {
@@ -30,6 +31,18 @@ pub struct EntityAttributes {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum PrimitiveGeometry {
+    /// The qualified zero-radius/zero-basis ARC storage pattern. This preserves
+    /// saved values without declaring a valid curve or inventing endpoints.
+    DegenerateArc {
+        center: [f64; 3],
+        radius: f64,
+        x_axis: [f64; 3],
+        y_axis: [f64; 3],
+        sweep_angle: f64,
+    },
+    Point {
+        point: [f64; 3],
+    },
     Line {
         start: [f64; 3],
         end: [f64; 3],
@@ -121,7 +134,7 @@ pub(crate) fn decode_primitive(
     profile: RecordProfile,
 ) -> Option<Result<PrimitiveEntity, String>> {
     let kind = header.type_id.as_str();
-    if !matches!(kind, LINE | CIRCLE | ARC) {
+    if !matches!(kind, LINE | CIRCLE | ARC | POINT) {
         return None;
     }
     Some((|| {
@@ -132,7 +145,11 @@ pub(crate) fn decode_primitive(
             ));
         }
         let width = attribute_width(profile);
-        let geometry_size = if kind == LINE { 48 } else { 88 };
+        let geometry_size = match kind {
+            POINT => 24,
+            LINE => 48,
+            _ => 88,
+        };
         if header.payload_span.length != (width + geometry_size) as u64 {
             return Err(format!(
                 "Unsupported primitive body length {} for {} (expected {}).",
@@ -147,7 +164,19 @@ pub(crate) fn decode_primitive(
             f64::from_le_bytes(body[width + offset..width + offset + 8].try_into().unwrap())
         };
         let vector = |offset| [number(offset), number(offset + 8), number(offset + 16)];
-        let geometry = if kind == LINE {
+        let geometry = if kind == POINT {
+            let point = vector(0);
+            if point.iter().any(|v| !v.is_finite()) {
+                return Err("Non-finite POINT coordinate.".into());
+            }
+            // The native point loader reads XYZ, then discards Z.
+            if point[2] != 0.0 {
+                return Err(
+                    "Non-planar POINT coordinates are outside the supported profile.".into(),
+                );
+            }
+            PrimitiveGeometry::Point { point }
+        } else if kind == LINE {
             let start = vector(0);
             let end = vector(24);
             if start.iter().chain(&end).any(|value| !value.is_finite()) {
@@ -176,6 +205,24 @@ pub(crate) fn decode_primitive(
                 return Err("Non-finite circular primitive parameter.".into());
             }
             if radius <= 0.0 {
+                if kind == ARC
+                    && radius == 0.0
+                    && center[2] == 0.0
+                    && x_axis == [0.0; 3]
+                    && y_axis == [0.0; 3]
+                    && sweep_angle == std::f64::consts::TAU
+                {
+                    return Ok(PrimitiveEntity {
+                        attributes,
+                        geometry: PrimitiveGeometry::DegenerateArc {
+                            center,
+                            radius,
+                            x_axis,
+                            y_axis,
+                            sweep_angle,
+                        },
+                    });
+                }
                 return Err("Degenerate circular primitive: radius must be positive.".into());
             }
             if center[2] != 0.0 || x_axis[2] != 0.0 || y_axis[2] != 0.0 {
@@ -263,6 +310,101 @@ mod tests {
             .records
             .remove(0);
         (data, header)
+    }
+
+    #[test]
+    fn degenerate_arc_storage_is_preserved_without_becoming_a_normal_arc() {
+        let values = [
+            2.,
+            -3.5,
+            0.,
+            0.,
+            0.,
+            0.,
+            0.,
+            0.,
+            0.,
+            0.,
+            std::f64::consts::TAU,
+        ];
+        for (width, profile) in [
+            (33, RecordProfile::Schema3Attributes33),
+            (37, RecordProfile::Schema3Attributes37),
+        ] {
+            let (data, header) = fixture(ARC, 1, width, &values);
+            let entity = decode_primitive(&data, &header, profile).unwrap().unwrap();
+            assert_eq!(
+                entity.geometry,
+                PrimitiveGeometry::DegenerateArc {
+                    center: [2., -3.5, 0.],
+                    radius: 0.,
+                    x_axis: [0.; 3],
+                    y_axis: [0.; 3],
+                    sweep_angle: std::f64::consts::TAU,
+                }
+            );
+            assert!(crate::transform_primitive(
+                &entity.geometry,
+                &crate::WorldTransform::identity()
+            )
+            .is_err());
+            for end in 0..data.len() {
+                assert!(decode_primitive(&data[..end], &header, profile)
+                    .unwrap()
+                    .is_err());
+            }
+            for (index, value) in [
+                (0, f64::NAN),
+                (2, 1.),
+                (3, -1.),
+                (4, 1.),
+                (10, 0.),
+                (10, 1.),
+            ] {
+                let mut altered = values;
+                altered[index] = value;
+                let (data, header) = fixture(ARC, 1, width, &altered);
+                assert!(decode_primitive(&data, &header, profile).unwrap().is_err());
+            }
+            let (data, header) = fixture(CIRCLE, 1, width, &values);
+            assert!(decode_primitive(&data, &header, profile).unwrap().is_err());
+        }
+    }
+
+    #[test]
+    fn point_profiles_are_exact_bounded_and_planar() {
+        for (width, profile) in [
+            (33, RecordProfile::Schema3Attributes33),
+            (37, RecordProfile::Schema3Attributes37),
+        ] {
+            let (data, header) = fixture(POINT, 100, width, &[1.25, -2.5, 0.]);
+            let point = decode_primitive(&data, &header, profile).unwrap().unwrap();
+            assert_eq!(
+                point.geometry,
+                PrimitiveGeometry::Point {
+                    point: [1.25, -2.5, 0.]
+                }
+            );
+            assert_eq!(point.attributes.layer_id_raw, -24);
+            for n in 0..data.len() {
+                assert!(decode_primitive(&data[..n], &header, profile)
+                    .unwrap()
+                    .is_err());
+            }
+            for values in [
+                &[1., 2.][..],
+                &[1., 2., 0., 4.],
+                &[1., 2., 3.],
+                &[f64::NAN, 2., 0.],
+                &[1., f64::INFINITY, 0.],
+            ] {
+                let (data, header) = fixture(POINT, 1, width, values);
+                assert!(decode_primitive(&data, &header, profile).unwrap().is_err());
+            }
+            let (data, mut header) = fixture(POINT, 1, width, &[1., 2., 0.]);
+            header.object_schema = 2;
+            assert!(decode_primitive(&data, &header, profile).unwrap().is_err());
+        }
     }
 
     #[test]

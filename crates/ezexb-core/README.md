@@ -25,9 +25,11 @@ The final argument selects strictness. Strict reads return
 return the supported subset with diagnostics; input and resource errors still
 fail. `read_bytes` and `Container::document` expose the same reader.
 
-Supported data includes LINE, CIRCLE, ARC, POLYLINE, TEXT, INSERT attributes,
+Supported data includes POINT, LINE, CIRCLE, ARC, POLYLINE, TEXT, INSERT attributes,
 attribute definitions, HATCH/SOLID boundaries, stored NURBS/ELLIPSE parameters,
-partial dimension data and layer/style/space/block context. Coordinates remain
+partial dimension/symbol data, part-number callouts, stored tables/BOM presentations,
+2D view references and layer/style/space/block context. Qualified degenerate ARC storage
+is retained with diagnostics. Table regeneration and view clipping are not evaluated. Coordinates remain
 in the stored block coordinate system, and physical units are not inferred.
 Exact supported builds and limitations are documented in the
 [reader guide](https://github.com/monozukuri-ai/ezexb/blob/main/docs/reading.md).

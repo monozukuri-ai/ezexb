@@ -129,6 +129,9 @@ impl WorldTransform {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind")]
 pub enum WorldCurve {
+    Point {
+        point: [f64; 3],
+    },
     Line {
         start: [f64; 3],
         end: [f64; 3],
@@ -226,6 +229,16 @@ pub fn transform_primitive(
     transform: &WorldTransform,
 ) -> Result<WorldCurve, String> {
     let (center, radius, x_axis, y_axis, sweep, closed) = match geometry {
+        PrimitiveGeometry::DegenerateArc { .. } => {
+            return Err(
+                "Degenerate ARC retains stored values but has no qualified world curve.".into(),
+            );
+        }
+        PrimitiveGeometry::Point { point } => {
+            return Ok(WorldCurve::Point {
+                point: transform.transform_point(*point)?,
+            })
+        }
         PrimitiveGeometry::Line { start, end } => {
             return Ok(WorldCurve::Line {
                 start: transform.transform_point(*start)?,
@@ -545,6 +558,10 @@ impl Expansion<'_> {
                     }
                     continue;
                 }
+                Geometry::View2D(_) => {
+                    self.issue("unsupported_world_clip", "View2D placement and clipping are not evaluated; its referenced block is not expanded.", Some(entity));
+                    Err("View2D is retained as a stored view without world geometry.".into())
+                }
                 _ => Err("World curve conversion is unavailable for this stored entity; its instance transform is retained.".into()),
             };
             let geometry = match geometry {
@@ -645,6 +662,25 @@ use crate::test_fixture as fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn point_transform_preserves_translation_and_rejects_overflow() {
+        let point = PrimitiveGeometry::Point {
+            point: [2., -3., 0.],
+        };
+        let mut transform = WorldTransform::identity();
+        transform.matrix[0] = -2.;
+        transform.matrix[5] = 3.;
+        transform.matrix[12] = 10.;
+        transform.matrix[13] = 20.;
+        assert_eq!(
+            transform_primitive(&point, &transform).unwrap(),
+            WorldCurve::Point {
+                point: [6., 11., 0.]
+            }
+        );
+        transform.matrix[0] = f64::MAX;
+        assert!(transform_primitive(&point, &transform).is_err());
+    }
     #[test]
     fn native_row_vector_order_and_nested_composition() {
         let mut translation = WorldTransform::identity();

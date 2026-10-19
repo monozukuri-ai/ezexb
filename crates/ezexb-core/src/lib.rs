@@ -3,6 +3,7 @@
 
 mod annotation;
 mod attributes;
+mod bom;
 mod complex;
 mod compression;
 mod container;
@@ -11,10 +12,13 @@ mod document;
 mod geometry;
 mod lines;
 mod metadata;
+mod partno;
 mod preview;
 mod records;
 mod render;
+mod table;
 mod text_style;
+mod view2d;
 mod world;
 
 #[cfg(test)]
@@ -24,13 +28,16 @@ mod document_tests;
 mod error;
 mod probe;
 #[cfg(test)]
-#[path = "../examples/support/document_fixture.rs"]
-mod test_fixture;
+#[path = "../examples/support/remaining_fixture.rs"]
+mod remaining_test_fixture;
+#[cfg(test)]
+use remaining_test_fixture::base as test_fixture;
 
 pub use annotation::{
     AnnotationEntity, AnnotationGeometry, PolylineGeometry, PolylineVertex, TextGeometry,
 };
 pub use attributes::*;
+pub use bom::*;
 pub use complex::*;
 pub use compression::{
     decode_stream_payload, DecodedStream, StreamPayloadBlock, StreamPayloadInfo,
@@ -44,6 +51,7 @@ pub use lines::{
     UnsupportedLine,
 };
 pub use metadata::*;
+pub use partno::*;
 pub use preview::*;
 pub use records::{
     inspect_record_headers, inspect_record_headers_with_profile, RecordDisplayCache,
@@ -51,7 +59,9 @@ pub use records::{
     RecordPropertyValue, RecordRelation,
 };
 pub use render::*;
+pub use table::*;
 pub use text_style::*;
+pub use view2d::*;
 pub use world::*;
 
 pub use error::Error;

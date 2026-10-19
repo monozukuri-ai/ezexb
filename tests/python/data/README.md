@@ -53,3 +53,40 @@ cargo run -p ezexb-core --example make_document_fixture -- document-partial.cfb 
 
 The generator refuses to overwrite an existing file. Rust tests also synthesize
 11, 15 and 16 branches, malformed references, cycles and budget boundaries.
+
+## Additional entity fixtures
+
+`entities-10.cfb` and `entities-18.cfb` extend the original stored-document fixtures
+with POINT and six additional dimension classes. The build-10 fixture also adds
+roughness, geometric tolerance, section and datum symbols, plus a part-number
+callout with nested presentation and semantic item copies. Dimension/symbol tails
+are deliberately unresolved synthetic bytes; strict reading must remain incomplete.
+The build strings select parser branches and do not indicate CAD-authored fixtures.
+
+```sh
+cargo run -p ezexb-core --example make_entity_fixture -- entities-10.cfb 10
+cargo run -p ezexb-core --example make_entity_fixture -- entities-18.cfb 18
+```
+
+No third-party EXB bytes are copied. The generator refuses to overwrite existing
+files. Tests check typed Python/CLI data, nested record separation, world points,
+approximate SVG output, and cumulative record/depth budgets.
+
+
+## Remaining stored-object fixtures
+
+`remaining-10.cfb` and `remaining-18.cfb` extend the original stored-document
+fixtures with a diagnosed zero-radius/zero-basis ARC. Build 10 also contains a
+View2D circular clip and BOM header/row presentations with original LINE/TEXT.
+Build 18 adds general and hole-chart tables with sparse indices, Unicode cells,
+block content and typed numeric properties. All bytes and text are original
+synthetic data under the project MIT license, not CAD-authored exports.
+
+```sh
+cargo run -p ezexb-core --example make_remaining_fixture -- remaining-10.cfb 10
+cargo run -p ezexb-core --example make_remaining_fixture -- remaining-18.cfb 18
+```
+
+The generator refuses overwrites. Tests check typed Rust/Python/CLI fields,
+strict/partial diagnostics, cumulative limits, omitted view expansion and
+single rendering of saved table/BOM presentations.

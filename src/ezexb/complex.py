@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Literal
 from .content import RecordHeader, SourceSpan, TextField, _record_header
 
 if TYPE_CHECKING:
-    from .document import Arc, Circle, EntityAttributes, Line, Polyline, Text
+    from .document import Arc, Circle, DegenerateArc, EntityAttributes, Line, Point, Polyline, Text
+    from .partno import PartItem
 
 
 @dataclass(frozen=True)
@@ -62,7 +63,7 @@ class BoundaryPolyline:
 @dataclass(frozen=True)
 class PresentationGeometry:
     category: str
-    geometry: Line | Circle | Arc | Polyline | Text | Solid
+    geometry: DegenerateArc | Point | Line | Circle | Arc | Polyline | Text | Solid | PartItem
 
 
 @dataclass(frozen=True)
@@ -207,6 +208,77 @@ class Dimension:
 
 
 @dataclass(frozen=True)
+class Roughness:
+    symbol_raw: int
+    same_requirement_raw: int
+    vein_raw: int
+    upper_value: TextField
+    lower_value: TextField
+    upper_caption: TextField
+    lower_caption: TextField
+    excess: TextField
+    minimum_roughness: TextField
+    leader_points: tuple[tuple[float, float, float], ...]
+    kind: Literal["Roughness"] = "Roughness"
+
+
+@dataclass(frozen=True)
+class GeometricTolerance:
+    leader_points: tuple[tuple[float, float, float], ...]
+    direction_raw: int
+    top_note: TextField
+    bottom_note: TextField
+    all_round_symbol_raw: int
+    kind: Literal["GeometricTolerance"] = "GeometricTolerance"
+
+
+@dataclass(frozen=True)
+class SymbolLabel:
+    location: tuple[float, float, float]
+    text: TextField
+
+
+@dataclass(frozen=True)
+class SectionMarker:
+    cut_points: tuple[tuple[float, float, float], ...]
+    labels: tuple[SymbolLabel, ...]
+    start_arrow_point: tuple[float, float, float]
+    end_arrow_point: tuple[float, float, float]
+    arrow_direction_raw: int
+    kind: Literal["SectionMarker"] = "SectionMarker"
+
+
+@dataclass(frozen=True)
+class Datum:
+    location_reference_raw: tuple[int, int]
+    location: tuple[float, float, float]
+    lead_line_raw: int
+    leader_points: tuple[tuple[float, float, float], ...]
+    upper_caption: TextField
+    lower_caption: TextField
+    aim_raw: int
+    mode_raw: int
+    name: TextField
+    symbol_angle: float
+    kind: Literal["Datum"] = "Datum"
+
+
+SymbolData = Roughness | GeometricTolerance | SectionMarker | Datum
+
+
+@dataclass(frozen=True)
+class Symbol:
+    symbol_type_id: str
+    data: SymbolData
+    presentation_records: tuple[PresentationRecord, ...]
+    presentation_span: SourceSpan
+    data_span: SourceSpan
+    unresolved_semantics_span: SourceSpan
+    span: SourceSpan
+    kind: Literal["Symbol"] = "Symbol"
+
+
+@dataclass(frozen=True)
 class PresentationRecord:
     header: RecordHeader
     attributes: EntityAttributes | None
@@ -215,14 +287,32 @@ class PresentationRecord:
 
 
 if TYPE_CHECKING:
-    BoundaryGeometry = Line | BoundaryCircular | BoundaryEllipse | BoundaryNurbs | BoundaryPolyline
+    BoundaryGeometry = (
+        BoundaryPoint | Line | BoundaryCircular | BoundaryEllipse | BoundaryNurbs | BoundaryPolyline
+    )
 
 
 def _decode(cls, value):
-    from .document import Arc, Circle, EntityAttributes, Line, Polyline, Text, _convert
+    from .document import (
+        Arc,
+        Circle,
+        DegenerateArc,
+        EntityAttributes,
+        Line,
+        Point,
+        Polyline,
+        Text,
+        _convert,
+    )
 
     value = dict(value)
-    for key in ("span", "reserved_dash_span", "presentation_span", "unresolved_semantics_span"):
+    for key in (
+        "span",
+        "reserved_dash_span",
+        "presentation_span",
+        "data_span",
+        "unresolved_semantics_span",
+    ):
         if key in value:
             value[key] = SourceSpan(**value[key])
     for key in (
@@ -246,6 +336,11 @@ def _decode(cls, value):
         "plane",
         "knots",
         "control_points",
+        "leader_points",
+        "cut_points",
+        "start_arrow_point",
+        "end_arrow_point",
+        "location_reference_raw",
     ):
         if key in value and value[key] is not None:
             value[key] = tuple(tuple(v) if isinstance(v, list) else v for v in value[key])
@@ -263,6 +358,7 @@ def _decode(cls, value):
         ("lines", HatchPatternLine),
         ("vertices", BoundaryVertex),
         ("presentation_records", PresentationRecord),
+        ("labels", SymbolLabel),
     ):
         if key in value:
             value[key] = tuple(_decode(nested, v) for v in value[key])
@@ -270,6 +366,30 @@ def _decode(cls, value):
         value["text_fields_stored"] = tuple(
             TextField(t["value"], SourceSpan(**t["span"])) for t in value["text_fields_stored"]
         )
+    if cls is Symbol:
+        classes = {
+            "Roughness": Roughness,
+            "GeometricTolerance": GeometricTolerance,
+            "SectionMarker": SectionMarker,
+            "Datum": Datum,
+        }
+        value["data"] = _decode(classes[value["data"]["kind"]], value["data"])
+    if cls in (Roughness, GeometricTolerance, Datum, SymbolLabel):
+        for key in (
+            "upper_value",
+            "lower_value",
+            "upper_caption",
+            "lower_caption",
+            "excess",
+            "minimum_roughness",
+            "top_note",
+            "bottom_note",
+            "name",
+            "text",
+        ):
+            if key in value:
+                t = value[key]
+                value[key] = TextField(t["value"], SourceSpan(**t["span"]))
     if cls is SolidGradient:
         t = value["name"]
         value["name"] = TextField(t["value"], SourceSpan(**t["span"]))
@@ -298,9 +418,15 @@ def _decode(cls, value):
             nested = g["geometry"]
             if g["category"] == "Solid":
                 geometry = _decode(StoredSolid, nested)
+            elif g["category"] == "PartItem":
+                from .partno import PartItem, _partno
+
+                geometry = _partno(PartItem, nested)
             else:
                 geometry = _convert(
                     {
+                        "DegenerateArc": DegenerateArc,
+                        "Point": Point,
                         "Line": Line,
                         "Circle": Circle,
                         "Arc": Arc,

@@ -73,6 +73,10 @@ pub enum Geometry {
     Insert(Insert),
     AttributeDefinition(Box<AttributeDefinition>),
     Complex(ComplexGeometry),
+    PartNumber(PartNumberGeometry),
+    BomTable(Box<BomTableGeometry>),
+    View2D(Box<View2DGeometry>),
+    Table(Box<TableGeometry>),
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Entity {
@@ -197,6 +201,44 @@ fn cached_count(records: &[RecordHeader]) -> u64 {
             ext.display_cache.records.len() as u64 + cached_count(&ext.display_cache.records)
         })
         .sum()
+}
+fn presentation_diagnostics(
+    report: &mut ReadReport,
+    records: &[PresentationRecord],
+    path: &str,
+    owner: &RecordHeader,
+    code: &str,
+) {
+    for child in records {
+        if matches!(
+            child.geometry,
+            Some(PresentationGeometry::Primitive(
+                PrimitiveGeometry::DegenerateArc { .. }
+            ))
+        ) {
+            issue(
+                report,
+                "degenerate_geometry",
+                "Stored ARC has zero radius and zero basis; no valid curve is inferred.",
+                Some(path),
+                Some(child.header.payload_span.clone()),
+                Some(owner),
+            );
+        }
+        if let Some(reason) = &child.unsupported_reason {
+            issue(
+                report,
+                code,
+                reason,
+                Some(path),
+                Some(child.header.span.clone()),
+                Some(owner),
+            );
+        }
+        if let Some(PresentationGeometry::PartItem(item)) = &child.geometry {
+            presentation_diagnostics(report, &item.presentation_records, path, owner, code);
+        }
+    }
 }
 struct StyleIndex<'a> {
     layers: HashMap<i32, &'a Layer>,
@@ -469,6 +511,54 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
                     Err(crate::complex::ComplexError::Limit(error)) => return Err(error),
                 }
             } else if let Some(result) =
+                crate::partno::decode_part_number(&data, record, profile, major, budget.remaining())
+            {
+                match result {
+                    Ok(entity) => Ok((
+                        entity.attributes,
+                        Geometry::PartNumber(entity.geometry),
+                        entity.budget_used,
+                    )),
+                    Err(crate::complex::ComplexError::Unsupported(reason)) => Err(reason),
+                    Err(crate::complex::ComplexError::Limit(error)) => return Err(error),
+                }
+            } else if let Some(result) =
+                crate::bom::decode_bom_table(&data, record, profile, major, budget.remaining())
+            {
+                match result {
+                    Ok(entity) => Ok((
+                        entity.attributes,
+                        Geometry::BomTable(Box::new(entity.geometry)),
+                        entity.budget_used,
+                    )),
+                    Err(crate::complex::ComplexError::Unsupported(reason)) => Err(reason),
+                    Err(crate::complex::ComplexError::Limit(error)) => return Err(error),
+                }
+            } else if let Some(result) =
+                crate::view2d::decode_view2d(&data, record, profile, major, budget.remaining())
+            {
+                match result {
+                    Ok(entity) => Ok((
+                        entity.attributes,
+                        Geometry::View2D(Box::new(entity.geometry)),
+                        entity.budget_used,
+                    )),
+                    Err(crate::complex::ComplexError::Unsupported(reason)) => Err(reason),
+                    Err(crate::complex::ComplexError::Limit(error)) => return Err(error),
+                }
+            } else if let Some(result) =
+                crate::table::decode_table(&data, record, profile, major, budget.remaining())
+            {
+                match result {
+                    Ok(entity) => Ok((
+                        entity.attributes,
+                        Geometry::Table(Box::new(entity.geometry)),
+                        entity.budget_used,
+                    )),
+                    Err(crate::complex::ComplexError::Unsupported(reason)) => Err(reason),
+                    Err(crate::complex::ComplexError::Limit(error)) => return Err(error),
+                }
+            } else if let Some(result) =
                 decode_attribute_definition(&data, record, profile, &build, budget.remaining())
             {
                 match result {
@@ -486,20 +576,75 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
             match decoded {
                 Ok((attributes, geometry, extra_budget)) => {
                     budget.charge(extra_budget)?;
+                    if matches!(
+                        geometry,
+                        Geometry::Primitive(PrimitiveGeometry::DegenerateArc { .. })
+                    ) {
+                        issue(&mut report, "degenerate_geometry", "Stored ARC has zero radius and zero basis; no valid curve is inferred.", Some(path), Some(record.payload_span.clone()), Some(record));
+                    }
                     if let Geometry::Complex(ComplexGeometry::Dimension(dimension)) = &geometry {
                         issue(&mut report, "unsupported_dimension_semantics", "Stored dimension values and cached presentation are decoded; construction, overrides and associativity remain unresolved.", Some(path), Some(dimension.unresolved_semantics_span.clone()), Some(record));
-                        for child in &dimension.presentation_records {
-                            if let Some(reason) = &child.unsupported_reason {
-                                issue(
-                                    &mut report,
-                                    "unsupported_dimension_presentation",
-                                    reason,
-                                    Some(path),
-                                    Some(child.header.span.clone()),
-                                    Some(record),
-                                );
-                            }
+                        presentation_diagnostics(
+                            &mut report,
+                            &dimension.presentation_records,
+                            path,
+                            record,
+                            "unsupported_dimension_presentation",
+                        );
+                    }
+                    if let Geometry::Complex(ComplexGeometry::Symbol(symbol)) = &geometry {
+                        issue(&mut report, "unsupported_symbol_semantics", "Stored annotation fields and cached presentation are decoded; reference objects, style evaluation and regeneration remain unresolved.", Some(path), Some(symbol.unresolved_semantics_span.clone()), Some(record));
+                        presentation_diagnostics(
+                            &mut report,
+                            &symbol.presentation_records,
+                            path,
+                            record,
+                            "unsupported_symbol_presentation",
+                        );
+                    }
+                    if let Geometry::PartNumber(part) = &geometry {
+                        issue(&mut report, "unsupported_part_number_semantics", "Stored part-number fields and item presentations are decoded; annotation style, table references and number regeneration remain unresolved.", Some(path), Some(part.span.clone()), Some(record));
+                        presentation_diagnostics(
+                            &mut report,
+                            &part.presentation_records,
+                            path,
+                            record,
+                            "unsupported_part_number_presentation",
+                        );
+                        for item in &part.items {
+                            presentation_diagnostics(
+                                &mut report,
+                                &item.geometry.presentation_records,
+                                path,
+                                record,
+                                "unsupported_part_number_presentation",
+                            );
                         }
+                    }
+                    if let Geometry::BomTable(table) = &geometry {
+                        issue(&mut report, "unsupported_bom_table_semantics", "Stored BOM placement and header/row presentations are decoded; external data-table cells, associations and regeneration remain unresolved.", Some(path), Some(table.span.clone()), Some(record));
+                        for item in &table.items {
+                            presentation_diagnostics(
+                                &mut report,
+                                &item.presentation_records,
+                                path,
+                                record,
+                                "unsupported_bom_table_presentation",
+                            );
+                        }
+                    }
+                    if let Geometry::View2D(view) = &geometry {
+                        issue(&mut report, "unsupported_view_semantics", "Stored view block reference and clip geometry are decoded; view evaluation and clipping remain unresolved. The view is not expanded as an ordinary INSERT.", Some(path), Some(view.span.clone()), Some(record));
+                    }
+                    if let Geometry::Table(table) = &geometry {
+                        issue(&mut report, "unsupported_table_semantics", "Stored table cells, layout and presentation are decoded; raw property meanings, style evaluation, linked data and regeneration remain unresolved.", Some(path), Some(table.unresolved_semantics_span.clone()), Some(record));
+                        presentation_diagnostics(
+                            &mut report,
+                            &table.presentation_records,
+                            path,
+                            record,
+                            "unsupported_table_presentation",
+                        );
                     }
                     let style = resolve_style(&attributes, &style_index, &mut report, path, record);
                     if let Geometry::Annotation(AnnotationGeometry::Text(text)) = &geometry {
@@ -649,12 +794,19 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
 fn validate_block_references(entities: &[Entity], blocks: &HashSet<i32>, report: &mut ReadReport) {
     let mut adjacency: HashMap<i32, Vec<i32>> = HashMap::new();
     for entity in entities {
-        if let Geometry::Insert(insert) = &entity.geometry {
+        let reference = match &entity.geometry {
+            Geometry::Insert(insert) => Some((insert, "INSERT", "unresolved_insert_block")),
+            Geometry::View2D(view) => {
+                Some((&view.block_reference, "View2D", "unresolved_view_block"))
+            }
+            _ => None,
+        };
+        if let Some((insert, label, code)) = reference {
             if !blocks.contains(&insert.block_id) {
                 report.diagnostics.push(Diagnostic {
-                    code: "unresolved_insert_block".into(),
+                    code: code.into(),
                     message: format!(
-                        "INSERT {} references unavailable block {}.",
+                        "{label} {} references unavailable block {}.",
                         entity.id, insert.block_id
                     ),
                     stream_path: Some(entity.source.stream_path.clone()),

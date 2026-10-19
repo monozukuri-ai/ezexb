@@ -113,6 +113,10 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
                 "ezexb/document.py",
                 "ezexb/world.py",
                 "ezexb/complex.py",
+                "ezexb/partno.py",
+                "ezexb/bom.py",
+                "ezexb/views.py",
+                "ezexb/tables.py",
             ]
             if not any(n.startswith("ezexb/_core") and n.endswith((".so", ".pyd")) for n in names):
                 raise ValueError(f"native extension is missing from {path}")
@@ -153,6 +157,10 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
                 "tests/python/data/document-10.cfb",
                 "tests/python/data/document-18.cfb",
                 "tests/python/data/document-partial.cfb",
+                "tests/python/data/entities-10.cfb",
+                "tests/python/data/entities-18.cfb",
+                "tests/python/data/remaining-10.cfb",
+                "tests/python/data/remaining-18.cfb",
                 "crates/ezexb-core/examples/make_schema3_fixture.rs",
                 "crates/ezexb-core/src/compression.rs",
                 "crates/ezexb-core/src/metadata.rs",
@@ -183,6 +191,18 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
                 "crates/ezexb-core/src/attributes.rs",
                 "crates/ezexb-core/src/text_style.rs",
                 "crates/ezexb-core/src/render.rs",
+                "crates/ezexb-core/src/bom.rs",
+                "crates/ezexb-core/src/table.rs",
+                "crates/ezexb-core/src/view2d.rs",
+                "src/ezexb/bom.py",
+                "src/ezexb/tables.py",
+                "src/ezexb/views.py",
+                "tests/python/test_remaining.py",
+                "crates/ezexb-core/examples/make_remaining_fixture.rs",
+                "crates/ezexb-core/examples/support/remaining_fixture.rs",
+                "crates/ezexb-core/examples/support/bom_fixture.rs",
+                "crates/ezexb-core/examples/support/table_fixture.rs",
+                "crates/ezexb-core/examples/support/view2d_fixture.rs",
                 "crates/ezexb-core/examples/world.rs",
             ]
         for name in names:
@@ -206,6 +226,10 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
                 "tests/python/data/document-10.cfb",
                 "tests/python/data/document-18.cfb",
                 "tests/python/data/document-partial.cfb",
+                "tests/python/data/entities-10.cfb",
+                "tests/python/data/entities-18.cfb",
+                "tests/python/data/remaining-10.cfb",
+                "tests/python/data/remaining-18.cfb",
             }:
                 raise ValueError(f"unexpected CFB asset in {path}: {name}")
         if not any(PurePosixPath(n).name == "LICENSE" for n in names):

@@ -39,23 +39,66 @@ use `read()` to access the additional supported entity layouts.
 
 | Object | Returned data | Boundary |
 | --- | --- | --- |
+| POINT | Stored XYZ position and attributes | 57/61-byte bodies; finite planar coordinates |
 | LINE | Stored endpoints, 33/37-byte attributes | 81/85-byte bodies; planar finite coordinates |
 | CIRCLE / ARC | Center, radius, basis; ARC sweep and endpoints | Positive radius, orthonormal XY basis; sweep in radians, basis preserves handedness |
+| DegenerateArc | Stored center, zero radius/basis and full-turn sweep | Only the qualified zero-radius/zero-basis pattern; `degenerate_geometry` diagnostic, no inferred curve or point |
 | POLYLINE | Vertices, bulges, widths, closure and normal | Version-dependent vertex encoding; zero discarded legacy Z and default normal |
 | TEXT | Unicode, insertion, stored dimensions, rotation/scale, raw formatting; decoded font/spacing styles | Stored values remain distinct from native layout |
 | INSERT / AttributeDefinition | Block reference, components/matrix, attached tag/value/TEXT; definition tag/prompt/default/TEXT | Visibility uncertainty is explicit; clipping and unusual embedded objects remain unsupported |
 | HATCH / SOLID | Boundary loops, native curve parameters, pattern/dash data or gradient fields | Nonempty association maps remain unsupported; no fill regeneration |
-| Dimension | Five types: linear, diameter, radius, leader, two-line angle; stored value/text/locations and typed cached presentation | Construction, overrides and associativity remain in `unresolved_semantics_span`; read remains incomplete |
+| Dimension | Linear, diameter, radius, leader, two-line angle, chamfer, coordinate list, half, large arc, origin and pitch; stored value/text/locations and typed cached presentation | Construction, overrides and associativity remain in `unresolved_semantics_span`; read remains incomplete |
+| Symbol | Roughness, geometric tolerance, section marker and datum; selected captions, raw modes, leader/cut points and cached presentation | Build 10/15 layouts only; reference objects and remaining semantics retain spans; read remains incomplete |
+| PartNumber | Style/table references, raw modes, reference-point data, leader points, scale, item indices and cached presentations | Build 10 only, empty override map; table/style resolution and number regeneration remain unsupported |
+| Table | General/hole-chart table columns, sparse rows/cells, text/block contents, typed raw properties, placement, break data and hole-chart fields | Build 18 only; raw modes, styles, linked data and regeneration remain unresolved |
+| BomTable | External data-table reference, placement, break/rewind points and typed header/row presentations | Build 10 only; semantic cell assignments and external table lookup are unresolved |
+| View2D | Inherited block-reference fields, name, view type and absent/circular clip | Build 10 only, no attached attributes; raw clip reference bytes preserved; no view expansion or clip evaluation |
 | NURBS / ELLIPSE | Stored control points/knots or axes/radii/angular fields | NURBS build 10/11 only; no fit-point reconstruction or native tessellation |
 | Layer / linetype / text style | Names, stored color/width, dash data, Western/CJK fonts and width/spacing factors | Font files are not embedded or loaded; advanced line styles remain unsupported |
 | Space / block | Names, IDs, membership, paper scale, optional SOLID attachment | Xrefs and unsupported optional objects remain explicit |
 
 `Document.entities` contains ordinary top-level records from all blocks, including
-unreferenced definitions. Attached attributes, optional block SOLIDs and dimension
+unreferenced definitions. Attached attributes, optional block SOLIDs and annotation
 presentation records remain nested. They never become ordinary model entities.
 `cached_record_count` counts the existing schema-3 display caches; inline dimension
 presentation is available separately in `Dimension.presentation_records`.
 `entities_in_block(id)` and `entities_in_space(id)` return direct members only.
+
+`Symbol.data` is a typed `Roughness`, `GeometricTolerance`, `SectionMarker` or
+`Datum` value. Only the fields before `unresolved_semantics_span` are interpreted;
+for example, geometric-tolerance notes and leaders do not constitute a decoded
+tolerance-frame definition. Inspect `presentation_records` for stored display
+primitives and text. These records are caches, not regenerated annotation geometry.
+
+`PartNumber.items` holds semantic item records; `presentation_records` holds their
+separate display copies. Both can contain nested `PartItem` presentations. An item's
+`index_raw` is a stored lookup index, not an inferred displayed number. Table and
+style references retain their IDs and flags. Reference-point optional fields keep
+their stored positions without assigning unverified geometric roles. Symbols and
+part numbers emit `unsupported_symbol_semantics` and
+`unsupported_part_number_semantics` respectively, so strict reading still raises.
+
+`Table` types are available from `ezexb.tables`. `table_type` distinguishes `"Table"`
+and `"HoleChart"`. Rows, cells, contents and properties retain their stored `index`;
+these can be sparse and are not positions in a dense matrix. Text is accessible at
+`cell.contents[n].value.text` when its `kind` is `"Text"`. Block content retains a
+reference, scale and rotation. Numeric properties preserve their native tag and
+`U16`/`U32`/`F64` value type without assigning unqualified meanings. Formatting,
+style evaluation, linked data and regeneration emit `unsupported_table_semantics`.
+`unresolved_semantics_span` covers the interspersed raw fields in `data_span`.
+
+`BomTable` is available from `ezexb.bom`. Its `items` are typed `Header`/`Row`
+display objects, with their own attributes and `presentation_records`. Saved TEXT
+records preserve captions and positions, but their order or coordinates do not
+establish semantic column/cell assignments. The external data-table reference
+remains unresolved and emits `unsupported_bom_table_semantics`.
+
+`View2D` and `ViewClip` are available from `ezexb.views`. `block_reference` retains
+INSERT-shaped fields while `clip` separately retains its circular curve, raw
+32-byte reference header and raw border flag. The header has no inferred coordinate
+meaning. `unsupported_view_semantics` keeps strict reading incomplete even when all
+stored fields decode. Block references are still checked for missing targets/cycles.
+`unsupported_entity_count == 0` does not imply that these semantics are complete.
 
 Coordinates in `read()` remain **stored block coordinates**. `document.units` is
 `None`; paper scale is not a physical-unit conversion. Raw attribute flags and color
@@ -140,10 +183,12 @@ subtraction is added. Attached Attribute TEXT uses the outer container transform
 applying its own INSERT's matrix again would move it twice. Layer-zero inheritance
 and ByBlock selection are resolved per instance, without modifying the definition.
 
-LINE/CIRCLE/ARC and POLYLINE curves are transformed. Nonuniform/sheared circular
+POINT positions and LINE/CIRCLE/ARC and POLYLINE curves are transformed. Nonuniform/sheared circular
 curves become `EllipticCurve` with radius-inclusive vectors:
 `p(t) = center + cos(t)*axis_u + sin(t)*axis_v`. Other entities retain their source
 index and instance transform; missing curve conversion has a diagnostic.
+View2D referenced blocks are not expanded, even without a clip, and produce
+`unsupported_world_clip`. DegenerateArc produces no world curve or inferred point.
 
 `source_document_complete`, `transforms_complete`, `geometry_complete`,
 `styles_complete`, and `render_complete` are independent. `WorldScene.complete`
@@ -152,12 +197,17 @@ combines transform/geometry/style completeness of the decoded subset; always che
 always reports `native_display_equivalent=false`.
 
 SVG is a world-XY preview with neutral strokes and system font fallback. It renders
-supported curves, fill boundaries, cached dimension presentation and supported plain
+supported curves, POINT markers, fill boundaries, cached dimension/symbol/part-number/table/BOM presentation and supported plain
 TEXT/attached text. It does not regenerate hatching, native line styles, gradients,
 CAD stroke fonts, wrapping, rich formatting or every text alignment. Unsupported
 text modes and attribute-definition display are omitted with diagnostics. Nominal
 text size, width and line spacing produce an approximation, not native glyph metrics.
 No external assets or font URLs are embedded. Output files are never overwritten.
+POINT markers use neutral round caps rather than native point styles and count
+toward `rendered_curve_count`. Part-number semantic item copies are not drawn a
+second time alongside their cached presentations. Table layout and BOM placement are not
+applied a second time to their saved display records; semantic cells are not rendered
+again. BOM item visibility and nested presentation visibility are checked separately.
 
 World visits, recursion and output items are bounded by `ParseOptions`; SVG byte
 output is capped by `max_decoded_stream_bytes`. Partial mode never bypasses budgets.

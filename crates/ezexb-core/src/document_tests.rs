@@ -177,3 +177,95 @@ fn unknown_build_and_truncated_known_fields_are_not_partial_success() {
         Err(Error::InvalidStream(_))
     ));
 }
+
+use crate::remaining_test_fixture as remaining_fixture;
+
+#[test]
+fn view_references_are_checked_without_expanding_clipped_blocks() {
+    let bytes = remaining_fixture::fixture(10);
+    let doc = read_bytes(&bytes, ParseOptions::default(), false).unwrap();
+    assert_eq!(doc.report.unsupported_entity_count, 0);
+    assert!(!doc.report.complete);
+    let scene = expand_world(&doc, -7, ParseOptions::default()).unwrap();
+    assert!(!scene.transforms_complete);
+    assert!(scene
+        .instances
+        .iter()
+        .all(|i| !i.insert_path.contains(&150)));
+    for id in [140, 150] {
+        assert!(scene
+            .instances
+            .iter()
+            .find(|i| i.entity_id == id)
+            .unwrap()
+            .geometry
+            .is_none());
+    }
+    for (target, code) in [
+        (999i32, "unresolved_view_block"),
+        (-5, "cyclic_block_reference"),
+    ] {
+        let view_source = &doc.entities.iter().find(|e| e.id == 150).unwrap().source;
+        let bad = fixture::mutate_stream(&bytes, BLOCK, |data| {
+            let p = view_source.payload_span.offset as usize + 221;
+            data[p..p + 4].copy_from_slice(&target.to_le_bytes());
+        });
+        let partial = read_bytes(&bad, ParseOptions::default(), false).unwrap();
+        assert!(partial.report.diagnostics.iter().any(|d| d.code == code));
+        assert!(matches!(
+            read_bytes(&bad, ParseOptions::default(), true),
+            Err(Error::IncompleteRead(_))
+        ));
+    }
+}
+
+#[test]
+fn bom_presentation_visibility_and_table_placement_are_not_applied_twice() {
+    let options = ParseOptions::default();
+    let mut doc = read_bytes(&remaining_fixture::fixture(10), options, false).unwrap();
+    let baseline = render_svg(
+        &read_bytes(&fixture::fixture(10), options, true).unwrap(),
+        -7,
+        options,
+    )
+    .unwrap();
+    for (flag, extra) in [(0, 2), (u16::MAX, 1), (17, 1)] {
+        let Geometry::BomTable(bom) = &mut doc
+            .entities
+            .iter_mut()
+            .find(|e| e.id == 160)
+            .unwrap()
+            .geometry
+        else {
+            panic!()
+        };
+        bom.items[0].attributes.hide_flag_raw = flag;
+        let svg = render_svg(&doc, -7, options).unwrap();
+        assert_eq!(
+            svg.rendered_curve_count,
+            baseline.rendered_curve_count + extra
+        );
+        assert_eq!(
+            svg.rendered_text_count,
+            baseline.rendered_text_count + extra
+        );
+        assert_eq!(svg.svg.matches("Part Ω").count(), extra as usize);
+        if flag == 17 {
+            assert!(svg
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("BOM item") && d.contains("visibility unknown")));
+        }
+    }
+    let mut table_doc = read_bytes(&remaining_fixture::fixture(18), options, false).unwrap();
+    let before = render_svg(&table_doc, -7, options).unwrap();
+    for entity in &mut table_doc.entities {
+        if let Geometry::Table(table) = &mut entity.geometry {
+            table.location = [1000., 2000., 0.];
+            table.rotation = 0.75;
+            table.scale = 7.;
+        }
+    }
+    let after = render_svg(&table_doc, -7, options).unwrap();
+    assert_eq!(before.svg, after.svg); // Saved presentations are already placed.
+}

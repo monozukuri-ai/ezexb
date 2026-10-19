@@ -11,13 +11,24 @@ const HATCH: &str = "79b9b625-ee7f-4fc9-b9a6-39036a219cf7";
 const SOLID: &str = "d7676d4e-b9e0-46c3-894d-e9ef7fb66fb2";
 const NURBS: &str = "838896be-c069-4566-8991-afd750b4547c";
 const ELLIPSE: &str = "85dc7b5d-daac-47c8-a126-ffad50d6cd68";
-const DIMS: [&str; 5] = [
+const DIMS: [&str; 11] = [
     "1da848b5-8c84-4c11-80d6-45cf9b26aa48",
     "f391cb78-240a-4fbd-9e3f-4f19572391fc",
     "aba4bd1e-d922-4b4d-931e-7f4c9d6919e7",
     "cc8682e6-a8cf-4a4f-aa36-c600b07aa69c",
     "5f9490d4-b797-4119-90b1-93668e2db71a",
+    "86e4facf-ec82-45c2-8c00-c6a37e4e1c77", // Chamfer
+    "131e29f6-4ef8-4503-829c-451acf7848c9", // Coordinate list
+    "76d19095-db03-4734-8a2e-178e1e7ec320", // Half
+    "5744b3d8-69bd-417f-9ea1-9e818dd7c25f", // Large-arc radius
+    "0bdf94e2-0699-4ce6-94f8-dee137ae16b4", // Origin
+    "432ac627-53ca-4496-a18c-53767f5aa8df", // Pitch
 ];
+const ROUGHNESS: &str = "64e92135-bb0b-4c37-bee3-e7dcdabf179e";
+const GEOMETRIC_TOLERANCE: &str = "9b79570d-4d57-4286-8105-ab9ce81c7f6c";
+const SECTION_MARKER: &str = "4b35dd46-6ddb-4b03-b233-51c18f214cf1";
+const DATUM: &str = "ebe7faa2-a9db-4c6d-a156-5ba4ed6df79a";
+const SYMBOLS: [&str; 4] = [ROUGHNESS, GEOMETRIC_TOLERANCE, SECTION_MARKER, DATUM];
 #[derive(Debug)]
 pub(crate) enum ComplexError {
     Unsupported(String),
@@ -45,6 +56,7 @@ pub enum ComplexGeometry {
     Hatch(HatchGeometry),
     Solid(SolidGeometry),
     Dimension(DimensionGeometry),
+    Symbol(SymbolGeometry),
     Nurbs(NurbsGeometry),
     Ellipse(EllipseGeometry),
 }
@@ -215,6 +227,66 @@ pub struct DimensionGeometry {
     pub unresolved_semantics_span: SourceSpan,
     pub span: SourceSpan,
 }
+/// Stored engineering-symbol fields. Construction, style overrides and
+/// associativity remain unresolved even when the presentation records decode.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SymbolGeometry {
+    pub symbol_type_id: String,
+    pub data: SymbolData,
+    pub presentation_records: Vec<PresentationRecord>,
+    pub presentation_span: SourceSpan,
+    pub data_span: SourceSpan,
+    pub unresolved_semantics_span: SourceSpan,
+    pub span: SourceSpan,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind")]
+pub enum SymbolData {
+    Roughness {
+        symbol_raw: u16,
+        same_requirement_raw: u8,
+        vein_raw: u16,
+        upper_value: TextField,
+        lower_value: TextField,
+        upper_caption: TextField,
+        lower_caption: TextField,
+        excess: TextField,
+        minimum_roughness: TextField,
+        leader_points: Vec<[f64; 3]>,
+    },
+    GeometricTolerance {
+        leader_points: Vec<[f64; 3]>,
+        direction_raw: u16,
+        top_note: TextField,
+        bottom_note: TextField,
+        all_round_symbol_raw: u8,
+    },
+    SectionMarker {
+        cut_points: Vec<[f64; 3]>,
+        labels: Vec<SymbolLabel>,
+        start_arrow_point: [f64; 3],
+        end_arrow_point: [f64; 3],
+        arrow_direction_raw: u16,
+    },
+    Datum {
+        /// Unresolved flags and object identifier preceding the stored location.
+        location_reference_raw: [u32; 2],
+        location: [f64; 3],
+        lead_line_raw: u32,
+        leader_points: Vec<[f64; 3]>,
+        upper_caption: TextField,
+        lower_caption: TextField,
+        aim_raw: u32,
+        mode_raw: u32,
+        name: TextField,
+        symbol_angle: f64,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SymbolLabel {
+    pub location: [f64; 3],
+    pub text: TextField,
+}
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PresentationRecord {
     pub header: RecordHeader,
@@ -228,6 +300,7 @@ pub enum PresentationGeometry {
     Primitive(PrimitiveGeometry),
     Annotation(AnnotationGeometry),
     Solid(SolidGeometry),
+    PartItem(Box<crate::partno::PartItemGeometry>),
 }
 
 pub(crate) fn decode_complex(
@@ -239,6 +312,7 @@ pub(crate) fn decode_complex(
 ) -> Option<Result<ComplexEntity, ComplexError>> {
     if !matches!(header.type_id.as_str(), HATCH | SOLID | NURBS | ELLIPSE)
         && !DIMS.contains(&header.type_id.as_str())
+        && !SYMBOLS.contains(&header.type_id.as_str())
     {
         return None;
     }
@@ -250,7 +324,13 @@ pub(crate) fn decode_complex(
         ) {
             return Err("Unsupported complex save-version profile.".into());
         }
-        if !matches!(header.object_schema, 1 | 100) || header.extension.is_some() {
+        let qualified_extension = (SYMBOLS.contains(&header.type_id.as_str())
+            || DIMS[5..].contains(&header.type_id.as_str()))
+            && header.object_schema == 3
+            && header.extension.is_some();
+        if !qualified_extension
+            && (!matches!(header.object_schema, 1 | 100) || header.extension.is_some())
+        {
             return Err("Unsupported complex object schema.".into());
         }
         let start =
@@ -321,6 +401,8 @@ pub(crate) fn decode_complex(
                 rotation,
                 span: c.span(s),
             })
+        } else if SYMBOLS.contains(&header.type_id.as_str()) {
+            ComplexGeometry::Symbol(symbol(&mut c, header, profile, major)?)
         } else if DIMS.contains(&header.type_id.as_str()) {
             ComplexGeometry::Dimension(dimension(&mut c, header, profile, major)?)
         } else {
@@ -383,6 +465,20 @@ impl Cursor<'_> {
     }
     fn u(&mut self) -> Result<u32, ComplexError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+    fn u16(&mut self) -> Result<u16, ComplexError> {
+        Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
+    }
+    fn u8(&mut self) -> Result<u8, ComplexError> {
+        Ok(self.take(1)?[0])
+    }
+    fn points(&mut self) -> Result<Vec<[f64; 3]>, ComplexError> {
+        let count = self.count()?;
+        let mut points = Vec::new();
+        for _ in 0..count {
+            points.push(self.v()?);
+        }
+        Ok(points)
     }
     fn f(&mut self) -> Result<f64, ComplexError> {
         let v = f64::from_le_bytes(self.take(8)?.try_into().unwrap());
@@ -695,12 +791,31 @@ fn gradient(c: &mut Cursor<'_>) -> Result<SolidGradient, ComplexError> {
         span: c.span(start),
     })
 }
-fn dimension(
-    c: &mut Cursor<'_>,
-    header: &RecordHeader,
+/// Decode a counted presentation collection inside a bounded parent payload.
+/// `data` must end at the enclosing body's end; all offsets retain its origin.
+pub(crate) fn decode_presentation(
+    data: &[u8],
+    start: usize,
     profile: RecordProfile,
     major: u32,
-) -> Result<DimensionGeometry, ComplexError> {
+    options: ParseOptions,
+    depth: u64,
+) -> Result<(Vec<PresentationRecord>, SourceSpan, u64), ComplexError> {
+    let mut c = Cursor {
+        data,
+        pos: start,
+        options,
+        used: 0,
+    };
+    let (records, span) = presentation(&mut c, profile, major, depth)?;
+    Ok((records, span, c.used))
+}
+fn presentation(
+    c: &mut Cursor<'_>,
+    profile: RecordProfile,
+    major: u32,
+    depth: u64,
+) -> Result<(Vec<PresentationRecord>, SourceSpan), ComplexError> {
     let start = c.pos;
     let count = c.u()?;
     ParseOptions::check_limit(
@@ -718,7 +833,7 @@ fn dimension(
             c.options,
             &mut c.used,
             profile,
-            1,
+            depth,
         )
         .map_err(|e| match e {
             FrameError::Invalid(e) => ComplexError::Limit(e),
@@ -773,7 +888,16 @@ fn dimension(
             unsupported_reason,
         });
     }
-    let presentation_span = c.span(start);
+    Ok((presentation_records, c.span(start)))
+}
+fn dimension(
+    c: &mut Cursor<'_>,
+    header: &RecordHeader,
+    profile: RecordProfile,
+    major: u32,
+) -> Result<DimensionGeometry, ComplexError> {
+    let start = c.pos;
+    let (presentation_records, presentation_span) = presentation(c, profile, major, 1)?;
     let value_stored = c.f()?;
     let mut text_fields_stored = vec![c.text()?, c.text()?];
     let flag1 = c.u()?;
@@ -786,6 +910,9 @@ fn dimension(
     let location = c.v()?;
     let text_location = c.v()?;
     let note_location = c.v()?;
+    if DIMS[5..].contains(&header.type_id.as_str()) && c.pos == c.data.len() {
+        return Err("Truncated type-specific dimension fields.".into());
+    }
     let unresolved_semantics_span = SourceSpan {
         offset: c.pos as u64,
         length: (c.data.len() - c.pos) as u64,
@@ -802,6 +929,111 @@ fn dimension(
         note_location,
         presentation_records,
         presentation_span,
+        unresolved_semantics_span,
+        span: c.span(start),
+    })
+}
+
+fn symbol(
+    c: &mut Cursor<'_>,
+    header: &RecordHeader,
+    profile: RecordProfile,
+    major: u32,
+) -> Result<SymbolGeometry, ComplexError> {
+    // Newer native saves move leader collections into different structures.
+    // Only the independently checked legacy layouts are admitted here.
+    if !matches!(major, 10 | 15) {
+        return Err("Unsupported engineering-symbol save-version profile.".into());
+    }
+    let start = c.pos;
+    let (presentation_records, presentation_span) = presentation(c, profile, major, 1)?;
+    let data_start = c.pos;
+    let (data, minimum_tail) = match header.type_id.as_str() {
+        ROUGHNESS => (
+            SymbolData::Roughness {
+                symbol_raw: c.u16()?,
+                same_requirement_raw: c.u8()?,
+                vein_raw: c.u16()?,
+                upper_value: c.text()?,
+                lower_value: c.text()?,
+                upper_caption: c.text()?,
+                lower_caption: c.text()?,
+                excess: c.text()?,
+                minimum_roughness: c.text()?,
+                leader_points: c.points()?,
+            },
+            8,
+        ),
+        GEOMETRIC_TOLERANCE => (
+            SymbolData::GeometricTolerance {
+                leader_points: c.points()?,
+                direction_raw: c.u16()?,
+                top_note: c.text()?,
+                bottom_note: c.text()?,
+                all_round_symbol_raw: c.u8()?,
+            },
+            8,
+        ),
+        SECTION_MARKER => {
+            let cut_points = c.points()?;
+            let count = c.count()?;
+            let mut labels = Vec::new();
+            for _ in 0..count {
+                labels.push(SymbolLabel {
+                    location: c.v()?,
+                    text: c.text()?,
+                });
+            }
+            (
+                SymbolData::SectionMarker {
+                    cut_points,
+                    labels,
+                    start_arrow_point: c.v()?,
+                    end_arrow_point: c.v()?,
+                    arrow_direction_raw: c.u16()?,
+                },
+                40,
+            )
+        }
+        DATUM => {
+            let location_reference_raw = [c.u()?, c.u()?];
+            if location_reference_raw[0] != 0x0080_0000 {
+                return Err("Unsupported datum location reference flags.".into());
+            }
+            (
+                SymbolData::Datum {
+                    location_reference_raw,
+                    location: c.v()?,
+                    lead_line_raw: c.u()?,
+                    leader_points: c.points()?,
+                    upper_caption: c.text()?,
+                    lower_caption: c.text()?,
+                    aim_raw: c.u()?,
+                    mode_raw: c.u()?,
+                    name: c.text()?,
+                    symbol_angle: c.f()?,
+                },
+                37,
+            )
+        }
+        _ => unreachable!(),
+    };
+    let data_span = c.span(data_start);
+    let remaining = c.data.len() - c.pos;
+    if remaining < minimum_tail {
+        return Err("Truncated engineering-symbol reference or semantic fields.".into());
+    }
+    let unresolved_semantics_span = SourceSpan {
+        offset: c.pos as u64,
+        length: remaining as u64,
+    };
+    c.pos = c.data.len();
+    Ok(SymbolGeometry {
+        symbol_type_id: header.type_id.clone(),
+        data,
+        presentation_records,
+        presentation_span,
+        data_span,
         unresolved_semantics_span,
         span: c.span(start),
     })
@@ -944,6 +1176,311 @@ mod tests {
             decode(&b, DIMS[0], options),
             Err(ComplexError::Limit(_))
         ))
+    }
+    fn text(b: &mut Vec<u8>, value: &str) {
+        let units: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+        u(b, (units.len() * 2) as u32);
+        for unit in units {
+            b.extend_from_slice(&unit.to_le_bytes());
+        }
+    }
+    fn points(b: &mut Vec<u8>) {
+        u(b, 2);
+        for value in [1., 2., 0., 3., 4., 0.] {
+            f(b, value);
+        }
+    }
+    fn symbol_body(kind: &str) -> (Vec<u8>, usize) {
+        let mut b = attrs();
+        u(&mut b, 0); // No presentation children in this original synthetic case.
+        let minimum_tail = match kind {
+            ROUGHNESS => {
+                b.extend_from_slice(&[2, 0, 1, 7, 0]);
+                for value in ["Ra 0.8", "Ra 0.4", "upper", "lower", "0.2", "0.1"] {
+                    text(&mut b, value);
+                }
+                points(&mut b);
+                8
+            }
+            GEOMETRIC_TOLERANCE => {
+                points(&mut b);
+                b.extend_from_slice(&3u16.to_le_bytes());
+                text(&mut b, "TOP");
+                text(&mut b, "BOTTOM");
+                b.push(1);
+                8
+            }
+            SECTION_MARKER => {
+                points(&mut b);
+                u(&mut b, 1);
+                for value in [5., 6., 0.] {
+                    f(&mut b, value);
+                }
+                text(&mut b, "A");
+                for value in [7., 8., 0., 9., 10., 0.] {
+                    f(&mut b, value);
+                }
+                b.extend_from_slice(&2u16.to_le_bytes());
+                40
+            }
+            DATUM => {
+                u(&mut b, 0x0080_0000);
+                u(&mut b, 17);
+                for value in [5., 6., 0.] {
+                    f(&mut b, value);
+                }
+                u(&mut b, 1);
+                points(&mut b);
+                text(&mut b, "upper");
+                text(&mut b, "lower");
+                u(&mut b, 2);
+                u(&mut b, 3);
+                text(&mut b, "A");
+                f(&mut b, 0.25);
+                37
+            }
+            _ => unreachable!(),
+        };
+        let prefix_end = b.len();
+        b.resize(prefix_end + minimum_tail, 0);
+        (b, prefix_end)
+    }
+    #[test]
+    fn engineering_symbols_keep_typed_fields_separate_from_unknown_semantics() {
+        for kind in SYMBOLS {
+            let (b, prefix_end) = symbol_body(kind);
+            let decoded = decode(&b, kind, ParseOptions::default()).unwrap();
+            let ComplexGeometry::Symbol(symbol) = decoded.geometry else {
+                panic!()
+            };
+            assert_eq!(symbol.symbol_type_id, kind);
+            assert!(symbol.presentation_records.is_empty());
+            assert_eq!(
+                symbol.presentation_span,
+                SourceSpan {
+                    offset: 33,
+                    length: 4
+                }
+            );
+            assert_eq!(symbol.data_span.offset, 37);
+            assert_eq!(
+                symbol.data_span.offset + symbol.data_span.length,
+                prefix_end as u64
+            );
+            assert_eq!(symbol.unresolved_semantics_span.offset, prefix_end as u64);
+            match symbol.data {
+                SymbolData::Roughness {
+                    symbol_raw,
+                    upper_value,
+                    lower_value,
+                    leader_points,
+                    ..
+                } => {
+                    assert_eq!(symbol_raw, 2);
+                    assert_eq!(upper_value.value, "Ra 0.8");
+                    assert_eq!(lower_value.value, "Ra 0.4");
+                    assert_eq!(leader_points[1], [3., 4., 0.]);
+                }
+                SymbolData::GeometricTolerance {
+                    direction_raw,
+                    top_note,
+                    bottom_note,
+                    all_round_symbol_raw,
+                    ..
+                } => {
+                    assert_eq!(direction_raw, 3);
+                    assert_eq!(top_note.value, "TOP");
+                    assert_eq!(bottom_note.value, "BOTTOM");
+                    assert_eq!(all_round_symbol_raw, 1);
+                }
+                SymbolData::SectionMarker {
+                    labels,
+                    start_arrow_point,
+                    end_arrow_point,
+                    arrow_direction_raw,
+                    ..
+                } => {
+                    assert_eq!(labels[0].location, [5., 6., 0.]);
+                    assert_eq!(labels[0].text.value, "A");
+                    assert_eq!(start_arrow_point, [7., 8., 0.]);
+                    assert_eq!(end_arrow_point, [9., 10., 0.]);
+                    assert_eq!(arrow_direction_raw, 2);
+                }
+                SymbolData::Datum {
+                    location_reference_raw,
+                    location,
+                    name,
+                    aim_raw,
+                    mode_raw,
+                    symbol_angle,
+                    ..
+                } => {
+                    assert_eq!(location_reference_raw, [0x0080_0000, 17]);
+                    assert_eq!(location, [5., 6., 0.]);
+                    assert_eq!(name.value, "A");
+                    assert_eq!((aim_raw, mode_raw, symbol_angle), (2, 3, 0.25));
+                }
+            }
+            // A bounded unknown remainder does not excuse a truncated known prefix
+            // or a missing minimum reference/semantic suffix.
+            for end in 0..b.len() {
+                assert!(
+                    decode(&b[..end], kind, ParseOptions::default()).is_err(),
+                    "{kind} {end}"
+                );
+            }
+            assert!(decode_complex(
+                &b,
+                &header(kind, b.len()),
+                RecordProfile::Schema3Attributes33,
+                16,
+                ParseOptions::default()
+            )
+            .unwrap()
+            .is_err());
+        }
+    }
+    #[test]
+    fn schema3_symbols_decode_only_the_bounded_body_after_extension_framing() {
+        let (body, _) = symbol_body(ROUGHNESS);
+        let mut bytes = uuid::Uuid::parse_str(ROUGHNESS)
+            .unwrap()
+            .to_bytes_le()
+            .to_vec();
+        u(&mut bytes, 17);
+        u(&mut bytes, 0);
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        u(&mut bytes, body.len() as u32);
+        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(
+            &uuid::Uuid::parse_str("0fbb54e7-fc10-4b09-9499-924097c3bf94")
+                .unwrap()
+                .to_bytes_le(),
+        );
+        u(&mut bytes, 0);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        u(&mut bytes, 1);
+        u(&mut bytes, 0xf000_fe00);
+        bytes.extend_from_slice(&body[..33]);
+        bytes.extend_from_slice(&[0, 0]);
+        let mut used = 0;
+        let h = embedded_record(
+            &bytes,
+            0,
+            bytes.len(),
+            ParseOptions::default(),
+            &mut used,
+            RecordProfile::Schema3Attributes33,
+            0,
+        )
+        .ok()
+        .expect("valid framed schema3 symbol");
+        assert!(h.extension.is_some());
+        let decoded = decode_complex(
+            &bytes,
+            &h,
+            RecordProfile::Schema3Attributes33,
+            10,
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let ComplexGeometry::Symbol(symbol) = decoded.geometry else {
+            panic!()
+        };
+        assert_eq!(
+            symbol.span.offset + symbol.span.length,
+            h.payload_span.offset + h.payload_span.length
+        );
+        let mut invalid_header = h;
+        invalid_header.extension = None;
+        assert!(decode_complex(
+            &bytes,
+            &invalid_header,
+            RecordProfile::Schema3Attributes33,
+            10,
+            ParseOptions::default()
+        )
+        .unwrap()
+        .is_err());
+        for end in bytes.len() - 2..bytes.len() {
+            let mut used = 0;
+            assert!(embedded_record(
+                &bytes[..end],
+                0,
+                end,
+                ParseOptions::default(),
+                &mut used,
+                RecordProfile::Schema3Attributes33,
+                0
+            )
+            .is_err());
+        }
+    }
+    #[test]
+    fn symbol_counts_strings_and_numbers_are_checked_before_use() {
+        let (mut b, _) = symbol_body(GEOMETRIC_TOLERANCE);
+        b[37..41].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            decode(&b, GEOMETRIC_TOLERANCE, ParseOptions::default()),
+            Err(ComplexError::Limit(_))
+        ));
+        let (mut b, _) = symbol_body(GEOMETRIC_TOLERANCE);
+        b[41..49].copy_from_slice(&f64::NAN.to_le_bytes());
+        assert!(decode(&b, GEOMETRIC_TOLERANCE, ParseOptions::default()).is_err());
+        let (mut b, _) = symbol_body(DATUM);
+        b[37..41].copy_from_slice(&0x8080_0000u32.to_le_bytes());
+        assert!(decode(&b, DATUM, ParseOptions::default()).is_err());
+        for kind in SYMBOLS {
+            let (b, _) = symbol_body(kind);
+            let options = ParseOptions {
+                max_string_bytes: 1,
+                ..ParseOptions::default()
+            };
+            assert!(matches!(
+                decode(&b, kind, options),
+                Err(ComplexError::Limit(_))
+            ));
+            let options = ParseOptions {
+                max_records: 1,
+                ..ParseOptions::default()
+            };
+            assert!(matches!(
+                decode(&b, kind, options),
+                Err(ComplexError::Limit(_))
+            ));
+        }
+    }
+    #[test]
+    fn additional_dimension_families_use_the_shared_stored_prefix() {
+        let mut b = attrs();
+        u(&mut b, 0);
+        f(&mut b, 7.5);
+        text(&mut b, "7.5");
+        text(&mut b, "note");
+        u(&mut b, 1);
+        for value in ["prefix", "suffix", "stored"] {
+            text(&mut b, value);
+        }
+        f(&mut b, 2.);
+        u(&mut b, 3);
+        u(&mut b, 4);
+        for value in [1., 2., 0., 3., 4., 0., 5., 6., 0.] {
+            f(&mut b, value);
+        }
+        let prefix_end = b.len();
+        b.push(0);
+        for kind in &DIMS[5..] {
+            let entity = decode(&b, kind, ParseOptions::default()).unwrap();
+            let ComplexGeometry::Dimension(d) = entity.geometry else {
+                panic!()
+            };
+            assert_eq!(d.value_stored, 7.5);
+            assert_eq!(d.text_fields_stored[1].value, "note");
+            assert_eq!(d.location, [1., 2., 0.]);
+            assert_eq!(d.unresolved_semantics_span.length, 1);
+            assert!(decode(&b[..prefix_end], kind, ParseOptions::default()).is_err());
+        }
     }
     #[test]
     fn newer_fill_relation_and_gradient_have_exact_bounds() {

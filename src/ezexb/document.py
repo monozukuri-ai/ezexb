@@ -10,9 +10,13 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .complex import Dimension, Ellipse, Hatch, Nurbs, Solid, StoredSolid, _decode
+from .bom import BomTable, _bom
+from .complex import Dimension, Ellipse, Hatch, Nurbs, Solid, StoredSolid, Symbol, _decode
 from .content import FileInfo, RecordPropertyGroup, SourceSpan, TextField, _file_info
 from .inspection import EntryInfo
+from .partno import PartNumber, _partno
+from .tables import Table, _table
+from .views import View2D, _view
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,24 @@ class ResolvedStyle:
     color_raw: StyleValue
     line_width: StyleValue
     linetype_scale: float
+
+
+@dataclass(frozen=True)
+class DegenerateArc:
+    """Stored zero-radius/zero-basis ARC; not a drawable curve."""
+
+    center: tuple[float, float, float]
+    radius: float
+    x_axis: tuple[float, float, float]
+    y_axis: tuple[float, float, float]
+    sweep_angle: float
+    kind: Literal["DegenerateArc"] = "DegenerateArc"
+
+
+@dataclass(frozen=True)
+class Point:
+    point: tuple[float, float, float]
+    kind: Literal["Point"] = "Point"
 
 
 @dataclass(frozen=True)
@@ -200,7 +222,9 @@ class AttributeDefinition:
 
 
 Geometry = (
-    Line
+    DegenerateArc
+    | Point
+    | Line
     | Circle
     | Arc
     | Polyline
@@ -212,6 +236,11 @@ Geometry = (
     | Solid
     | Ellipse
     | Nurbs
+    | PartNumber
+    | BomTable
+    | View2D
+    | Table
+    | Symbol
 )
 
 
@@ -529,6 +558,8 @@ def _document(value: str) -> Document:
     )
     entities = []
     classes = {
+        "DegenerateArc": DegenerateArc,
+        "Point": Point,
         "Line": Line,
         "Circle": Circle,
         "Arc": Arc,
@@ -541,6 +572,11 @@ def _document(value: str) -> Document:
         "Solid": Solid,
         "Ellipse": Ellipse,
         "Nurbs": Nurbs,
+        "PartNumber": PartNumber,
+        "BomTable": BomTable,
+        "View2D": View2D,
+        "Table": Table,
+        "Symbol": Symbol,
     }
     for item in data["entities"]:
         item["source"] = _convert(EntitySource, item["source"])
@@ -550,8 +586,22 @@ def _document(value: str) -> Document:
             style[key] = StyleValue(**style[key])
         item["style"] = ResolvedStyle(**style)
         cls = classes[item["geometry"]["kind"]]
-        decoder = _decode if cls in (Dimension, Hatch, Solid, Ellipse, Nurbs) else _convert
-        item["geometry"] = decoder(cls, item["geometry"])
+        decoder = (
+            _partno
+            if cls is PartNumber
+            else _decode
+            if cls in (Dimension, Hatch, Solid, Ellipse, Nurbs, Symbol)
+            else _convert
+        )
+        item["geometry"] = (
+            _bom(item["geometry"])
+            if cls is BomTable
+            else _view(item["geometry"])
+            if cls is View2D
+            else _table(Table, item["geometry"])
+            if cls is Table
+            else decoder(cls, item["geometry"])
+        )
         item["properties"] = tuple(_property_group(prop) for prop in item["properties"])
         entities.append(Entity(**item))
     data["entities"] = tuple(entities)

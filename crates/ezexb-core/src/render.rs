@@ -42,6 +42,15 @@ impl Canvas {
     }
     fn curve(&mut self, curve: &WorldCurve) -> Result<(), Error> {
         match curve {
+            WorldCurve::Point { point } => {
+                self.bound(*point);
+                writeln!(
+                    self.body,
+                    "<path vector-effect=\"non-scaling-stroke\" stroke-linecap=\"round\" d=\"M {} {} L {} {}\"/>",
+                    point[0], point[1], point[0], point[1]
+                )
+                .unwrap();
+            }
             WorldCurve::Line { start, end } => {
                 self.bound(*start);
                 self.bound(*end);
@@ -124,6 +133,9 @@ impl Canvas {
         for boundary_loop in &boundary.loops {
             for boundary in &boundary_loop.curves {
                 let primitive = match &boundary.geometry {
+                    BoundaryGeometry::Point { point } => {
+                        Some(PrimitiveGeometry::Point { point: *point })
+                    }
                     BoundaryGeometry::Line { start, end } => Some(PrimitiveGeometry::Line {
                         start: *start,
                         end: *end,
@@ -187,7 +199,7 @@ impl Canvas {
                     }
                     _ => {
                         self.diagnostics.push(format!(
-                            "Entity {id}: point/ellipse/NURBS boundary preview is unavailable."
+                            "Entity {id}: ellipse/NURBS boundary preview is unavailable."
                         ));
                         None
                     }
@@ -216,7 +228,7 @@ impl Canvas {
                     .is_some_and(|a| a.hide_flag_raw != u16::MAX)
                 {
                     self.diagnostics.push(format!(
-                        "Dimension {id}: unknown cached visibility; item omitted."
+                        "Entity {id}: unknown cached visibility; item omitted."
                     ));
                 }
                 continue;
@@ -225,7 +237,7 @@ impl Canvas {
                 Some(PresentationGeometry::Primitive(p)) => match transform_primitive(p, transform)
                 {
                     Ok(curve) => self.curve(&curve)?,
-                    Err(e) => self.diagnostics.push(format!("Dimension {id}: {e}")),
+                    Err(e) => self.diagnostics.push(format!("Entity {id}: {e}")),
                 },
                 Some(PresentationGeometry::Annotation(AnnotationGeometry::Text(text))) => {
                     self.text(text, transform, styles, id)?
@@ -237,14 +249,17 @@ impl Canvas {
                                 self.curve(&s.curve)?;
                             }
                         }
-                        Err(e) => self.diagnostics.push(format!("Dimension {id}: {e}")),
+                        Err(e) => self.diagnostics.push(format!("Entity {id}: {e}")),
                     }
                 }
                 Some(PresentationGeometry::Solid(s)) => {
                     self.boundary(&s.boundary, transform, id)?
                 }
+                Some(PresentationGeometry::PartItem(item)) => {
+                    self.presentation(&item.presentation_records, transform, styles, id)?
+                }
                 None => self.diagnostics.push(format!(
-                    "Dimension {id}: unsupported cached presentation record {}.",
+                    "Entity {id}: unsupported cached presentation record {}.",
                     r.header.id_raw
                 )),
             }
@@ -455,6 +470,41 @@ pub fn render_svg(
                 &document.text_style_context.styles,
                 entity.id,
             )?,
+            Geometry::Complex(ComplexGeometry::Symbol(s)) => c.presentation(
+                &s.presentation_records,
+                &instance.transform,
+                &document.text_style_context.styles,
+                entity.id,
+            )?,
+            Geometry::PartNumber(p) => c.presentation(
+                &p.presentation_records,
+                &instance.transform,
+                &document.text_style_context.styles,
+                entity.id,
+            )?,
+            Geometry::Table(table) => c.presentation(
+                &table.presentation_records,
+                &instance.transform,
+                &document.text_style_context.styles,
+                entity.id,
+            )?,
+            Geometry::BomTable(table) => {
+                for item in &table.items {
+                    match item.attributes.hide_flag_raw {
+                        0 => c.presentation(
+                            &item.presentation_records,
+                            &instance.transform,
+                            &document.text_style_context.styles,
+                            entity.id,
+                        )?,
+                        u16::MAX => {}
+                        _ => c.diagnostics.push(format!(
+                            "BOM item {}: visibility unknown; presentation omitted.",
+                            item.header.id_raw
+                        )),
+                    }
+                }
+            }
             Geometry::AttributeDefinition(_) => {
                 c.diagnostics.push(format!("Entity {}: attribute definition display is omitted; attached instance text is handled separately.",entity.id));
             }
