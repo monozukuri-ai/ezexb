@@ -24,7 +24,7 @@ python -m pip install .
 
 Prebuilt release wheels target Linux x86_64 (glibc 2.28+), Windows x86_64, and
 macOS Intel / Apple silicon. A source install requires a Rust toolchain.
-See [development](docs/development.md) for an editable installation and tests.
+See [development](https://github.com/monozukuri-ai/ezexb/blob/main/docs/development.md) for an editable installation and tests.
 
 ## Read a drawing
 
@@ -49,7 +49,7 @@ in both modes. Input and resource errors always raise.
 
 Coordinates are stored in each block's coordinate system, and physical units
 are not inferred. Use `read_world()` to expand a selected space. A complete report
-means completeness within the [supported reader profile](docs/reading.md), not
+means completeness within the [supported reader profile](https://github.com/monozukuri-ai/ezexb/blob/main/docs/reading.md), not
 full EXB compatibility or CAXA display equivalence.
 
 ## Command line
@@ -92,14 +92,14 @@ it does not regenerate hatch fills. Writing and DXF export are not provided.
 
 ## Documentation
 
-- [Documentation index](docs/README.md)
-- [Reading, supported profiles and diagnostics](docs/reading.md)
-- [Container and stream inspection](docs/inspection.md)
-- [Metadata, previews and stream analysis](docs/stream-analysis.md)
-- [Rust core](crates/ezexb-core/README.md)
-- [Development](docs/development.md) and [releasing](docs/releasing.md)
+- [Documentation index](https://github.com/monozukuri-ai/ezexb/blob/main/docs/README.md)
+- [Reading, supported profiles and diagnostics](https://github.com/monozukuri-ai/ezexb/blob/main/docs/reading.md)
+- [Container and stream inspection](https://github.com/monozukuri-ai/ezexb/blob/main/docs/inspection.md)
+- [Metadata, previews and stream analysis](https://github.com/monozukuri-ai/ezexb/blob/main/docs/stream-analysis.md)
+- [Rust core](https://github.com/monozukuri-ai/ezexb/blob/main/crates/ezexb-core/README.md)
+- [Development](https://github.com/monozukuri-ai/ezexb/blob/main/docs/development.md) and [releasing](https://github.com/monozukuri-ai/ezexb/blob/main/docs/releasing.md)
 
 ## License
 
-MIT; see [LICENSE](LICENSE). This license covers ezexb's own code. Third-party
+MIT; see [LICENSE](https://github.com/monozukuri-ai/ezexb/blob/main/LICENSE). This license covers ezexb's own code. Third-party
 drawings and vendor materials are not included in source or binary distributions.

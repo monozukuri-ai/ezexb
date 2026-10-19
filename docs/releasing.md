@@ -5,7 +5,7 @@ known limitations, and should not describe it as a complete EXB implementation.
 
 ## Workflow
 
-[Release](../.github/workflows/release.yml) runs on `v*` tags and manual dispatch.
+[Release](https://github.com/monozukuri-ai/ezexb/blob/main/.github/workflows/release.yml) runs on `v*` tags and manual dispatch.
 It verifies the version and locks, runs the reusable CI suite, creates an sdist,
 and builds every release wheel from that sdist. Each wheel is installed and
 fully tested outside the checkout on CPython 3.10 and 3.14.
