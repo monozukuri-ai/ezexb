@@ -1,0 +1,176 @@
+# Stored-entity reader
+
+`ezexb.read(path)` and `ezexb.read_bytes(bytes)` return an immutable Python
+`Document` for the experimental `exb-stored-planar-v1` profile. The Rust core
+provides `read_file(path, options, strict)`, `read_bytes(data, options, strict)`,
+and `Container::document(strict)`. No CAXA installation is required.
+
+The profile is gated by these **exact observed product-build strings**:
+`10.0.0.0000`, `11.7.0.5203`, `15.0.0.5681`, `16.4.0.13104`, and
+`18.0.0.18159`. These strings select supported layouts; they are not an official EXB
+version specification. Unrecognized builds raise `UnsupportedFeatureError`.
+
+```python
+import ezexb
+
+# Strict mode is the default. An incomplete read raises with a structured report.
+try:
+    document = ezexb.read("drawing.exb")
+except ezexb.IncompleteReadError as error:
+    for diagnostic in error.report.diagnostics:
+        print(diagnostic.code, diagnostic.stream_path, diagnostic.span)
+
+# Explicitly request the supported subset of a more complex drawing.
+document = ezexb.read("drawing.exb", strict=False)
+print(document.report.complete, document.report.unsupported_entity_count)
+for space in document.spaces:
+    print(space.id, space.name.value, space.block_id)
+for entity in document.entities:
+    print(entity.id, entity.block_id, entity.kind, entity.style.layer_name)
+    if entity.kind == "Line":
+        print(entity.geometry.start, entity.geometry.end)
+```
+
+The `raw.Container.document(strict=...)` method reads the same profile from an
+owned snapshot. Existing `lines()` remains the lower-level 81-byte LINE API;
+use `read()` to access the additional supported entity layouts.
+
+## Profile boundary
+
+| Object | Returned data | Boundary |
+| --- | --- | --- |
+| LINE | Stored endpoints, 33/37-byte attributes | 81/85-byte bodies; planar finite coordinates |
+| CIRCLE / ARC | Center, radius, basis; ARC sweep and endpoints | Positive radius, orthonormal XY basis; sweep in radians, basis preserves handedness |
+| POLYLINE | Vertices, bulges, widths, closure and normal | Version-dependent vertex encoding; zero discarded legacy Z and default normal |
+| TEXT | Unicode, insertion, stored dimensions, rotation/scale, raw formatting; decoded font/spacing styles | Stored values remain distinct from native layout |
+| INSERT / AttributeDefinition | Block reference, components/matrix, attached tag/value/TEXT; definition tag/prompt/default/TEXT | Visibility uncertainty is explicit; clipping and unusual embedded objects remain unsupported |
+| HATCH / SOLID | Boundary loops, native curve parameters, pattern/dash data or gradient fields | Nonempty association maps remain unsupported; no fill regeneration |
+| Dimension | Five types: linear, diameter, radius, leader, two-line angle; stored value/text/locations and typed cached presentation | Construction, overrides and associativity remain in `unresolved_semantics_span`; read remains incomplete |
+| NURBS / ELLIPSE | Stored control points/knots or axes/radii/angular fields | NURBS build 10/11 only; no fit-point reconstruction or native tessellation |
+| Layer / linetype / text style | Names, stored color/width, dash data, Western/CJK fonts and width/spacing factors | Font files are not embedded or loaded; advanced line styles remain unsupported |
+| Space / block | Names, IDs, membership, paper scale, optional SOLID attachment | Xrefs and unsupported optional objects remain explicit |
+
+`Document.entities` contains ordinary top-level records from all blocks, including
+unreferenced definitions. Attached attributes, optional block SOLIDs and dimension
+presentation records remain nested. They never become ordinary model entities.
+`cached_record_count` counts the existing schema-3 display caches; inline dimension
+presentation is available separately in `Dimension.presentation_records`.
+`entities_in_block(id)` and `entities_in_space(id)` return direct members only.
+
+Coordinates in `read()` remain **stored block coordinates**. `document.units` is
+`None`; paper scale is not a physical-unit conversion. Raw attribute flags and color
+encodings are preserved. `entity.style` distinguishes ByLayer, ByBlock, explicit
+values and symbolic device widths. ByBlock values require an INSERT instance.
+A layer width flag of 0 means keeping the device width; flag 2 selects the stored float.
+
+`document.text_style_context` is a separate optional display-context result with its
+own `complete` and diagnostics. Text-style records remain in `styles.other_records`
+for source tracing. An incomplete optional text-style decode does not redefine the
+stored geometry profile's strictness. Rust `TextGeometry::presentation(styles)`
+resolves font names, width factors and the -1 line-spacing sentinel without changing
+saved values. Spacing factors are not asserted to be native glyph distances.
+
+`report.complete=True` means all required geometry, context and references passed
+**this stored-data profile**. It does not mean visual equivalence to CAXA or full
+EXB support. Application properties, annotation style bodies and selected context
+fields retain spans. Other streams, including drawing settings, dictionary,
+block-manager metadata and previews, are listed in `uninterpreted_streams`.
+The profile does not interpret their application-specific semantics.
+
+## Diagnostics and limits
+
+Strict mode raises `IncompleteReadError` with a typed `.report` and the original
+`.report_json`; Rust returns `Error::IncompleteRead(Box<ReadReport>)`.
+Partial mode returns decoded entities and diagnostics for unsupported types,
+unframed ranges, unsupported attributes, missing references and cyclic block
+references. Every unsupported entity includes its ID, type GUID, stream and span.
+Unknown nested record framing stops before the containing top-level record;
+there is no GUID search to resume parsing through unknown bytes.
+
+Resource failures remain errors in partial mode. `max_records` applies
+cumulatively to records, properties, relations, compression blocks, context
+entries, vertices and text items processed by one document read.
+`max_total_decoded_bytes` defaults to 256 MiB and bounds cumulative decoded
+allocations, including zlib padding, before allocation. Existing per-stream,
+file, string and recursion limits continue to apply. Source spans always refer
+to decoded stream bytes, not CFB file offsets.
+
+```sh
+ezexb read drawing.exb --json
+ezexb read drawing.exb --partial --json
+cargo run -p ezexb-core --example read -- drawing.exb --partial
+```
+
+The Python CLI exits with 0 for a returned document, 2 for an incomplete strict
+read, and 1 for input or resource errors. A successful `--partial` command can
+contain `report.complete=false`; automation must inspect that field.
+
+## World coordinates and portable SVG
+
+Choose a space ID from `document.spaces`; names do not imply model/paper semantics.
+
+```python
+scene = ezexb.read_world("drawing.exb", -7, strict=False)
+print(scene.source_document_complete, scene.transforms_complete)
+for instance in scene.instances:
+    print(instance.entity_id, instance.insert_path, instance.transform.matrix)
+
+preview = ezexb.svg_preview("drawing.exb", -7, strict=False)
+with open("drawing.svg", "x", encoding="utf-8") as output:
+    output.write(preview.svg)
+print(preview.native_display_equivalent, preview.diagnostics)
+```
+
+The same operations are `raw.Container.world(space_id, strict=...)` and
+`raw.Container.svg(...)`, including on `raw.open_bytes()` snapshots.
+Rust provides `expand_world(&document, space_id, options)` and
+`render_svg(&document, space_id, options)`, plus `Container::world_scene` and
+`Container::svg_preview`.
+
+```sh
+ezexb world drawing.exb --space=-7 --partial --json
+ezexb svg drawing.exb --space=-7 --partial --output drawing.svg --json
+cargo run -p ezexb-core --example world -- drawing.exb -7
+```
+
+Matrices use row vectors: `x' = x*m[0] + y*m[4] + z*m[8] + m[12]`.
+Child-to-root composition is `child * parent`. INSERT components must agree with
+the saved matrix under the observed native tolerance/branches. No extra base-point
+subtraction is added. Attached Attribute TEXT uses the outer container transform:
+applying its own INSERT's matrix again would move it twice. Layer-zero inheritance
+and ByBlock selection are resolved per instance, without modifying the definition.
+
+LINE/CIRCLE/ARC and POLYLINE curves are transformed. Nonuniform/sheared circular
+curves become `EllipticCurve` with radius-inclusive vectors:
+`p(t) = center + cos(t)*axis_u + sin(t)*axis_v`. Other entities retain their source
+index and instance transform; missing curve conversion has a diagnostic.
+
+`source_document_complete`, `transforms_complete`, `geometry_complete`,
+`styles_complete`, and `render_complete` are independent. `WorldScene.complete`
+combines transform/geometry/style completeness of the decoded subset; always check
+`source_document_complete` too. `render_complete` remains false. A generated SVG
+always reports `native_display_equivalent=false`.
+
+SVG is a world-XY preview with neutral strokes and system font fallback. It renders
+supported curves, fill boundaries, cached dimension presentation and supported plain
+TEXT/attached text. It does not regenerate hatching, native line styles, gradients,
+CAD stroke fonts, wrapping, rich formatting or every text alignment. Unsupported
+text modes and attribute-definition display are omitted with diagnostics. Nominal
+text size, width and line spacing produce an approximation, not native glyph metrics.
+No external assets or font URLs are embedded. Output files are never overwritten.
+
+World visits, recursion and output items are bounded by `ParseOptions`; SVG byte
+output is capped by `max_decoded_stream_bytes`. Partial mode never bypasses budgets.
+The CLI retains the same strict-read exit codes. World/preview completeness must
+be inspected independently even when the command succeeds.
+
+## Compatibility limits
+
+The reader is experimental. A supported build string does not guarantee that every
+object in a drawing is supported. Inspect diagnostics for each file, even when
+other drawings from the same application version have worked.
+
+Stored TEXT fields can differ from the values displayed by CAD software after
+layout or regeneration. Complete dimension semantics, physical units, native font
+layout and pixel-equivalent rendering are not supported. No editing or writing
+API is provided.

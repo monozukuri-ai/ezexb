@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: '3.12'
+      - name: Verify version and tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ "$EVENT_NAME" = push ]; then
+            uv run --no-project --python 3.12 python scripts/bump_version.py --check --tag "$RELEASE_TAG"
+          else
+            uv run --no-project --python 3.12 python scripts/bump_version.py --check
+          fi
+      - id: version
+        run: |
+          version=$(uv run --no-project --python 3.12 python -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  checks:
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+
+  sdist:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: '3.12'
+      - run: uv build --sdist --out-dir dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  wheels:
+    needs: [preflight, sdist]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: '2_28'
+            interpreter: python3.10
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            manylinux: 'off'
+            interpreter: python
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            manylinux: 'off'
+            interpreter: python
+          - os: macos-15
+            target: aarch64-apple-darwin
+            manylinux: 'off'
+            interpreter: python
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-sdist
+          path: dist
+      - name: Extract source distribution
+        shell: bash
+        run: |
+          mkdir release-source
+          tar -xzf dist/*.tar.gz -C release-source
+      - name: Build wheel from source distribution
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1
+        with:
+          maturin-version: v1.15.0
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          working-directory: release-source/ezexb-${{ needs.preflight.outputs.version }}
+          args: --release --locked --out ../../dist -i ${{ matrix.interpreter }}
+      - name: Check artifacts
+        run: uv run --no-project --python 3.12 python scripts/check_artifacts.py dist
+      - name: Test installed wheel on CPython 3.10
+        run: uv run --no-project --python 3.12 python scripts/verify_wheel.py dist --python 3.10
+      - name: Test installed wheel on CPython 3.14
+        run: uv run --no-project --python 3.12 python scripts/verify_wheel.py dist --python 3.14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-wheel-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  verify:
+    needs: [preflight, wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify the exact release bundle
+        env:
+          RELEASE_TAG: v${{ needs.preflight.outputs.version }}
+        run: python scripts/check_artifacts.py dist --release --tag "$RELEASE_TAG" --write-manifest verification/manifest.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-distributions
+          path: |
+            dist/*
+            verification/*
+          if-no-files-found: error
+
+  pypi:
+    needs: verify
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ezexb
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-distributions
+          path: .release
+      - name: Recheck qualified artifact hashes
+        working-directory: .release
+        run: sha256sum --check verification/SHA256SUMS
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: .release/dist
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-distributions
+          path: .release
+      - name: Recheck hashes and attach the published artifacts
+        working-directory: .release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          sha256sum --check verification/SHA256SUMS
+          gh release create "$RELEASE_TAG" dist/* verification/* --verify-tag --prerelease --title "ezexb $RELEASE_TAG" --generate-notes

@@ -1,0 +1,12 @@
+.internal/
+.venv/
+target/
+dist/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.so
+*.pyd
+*.egg-info/
+.DS_Store

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ezexb"
+dynamic = ["version"]
+description = "Experimental CAXA EXB reader with a Rust core and Python API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "neka-nat" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Rust",
+]
+
+[project.urls]
+Repository = "https://github.com/monozukuri-ai/ezexb"
+Documentation = "https://github.com/monozukuri-ai/ezexb/tree/main/docs"
+Issues = "https://github.com/monozukuri-ai/ezexb/issues"
+
+[project.scripts]
+ezexb = "ezexb.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1", "maturin>=1.9,<2", "tomli>=2; python_version < '3.11'"]
+
+[tool.maturin]
+manifest-path = "crates/ezexb-python/Cargo.toml"
+module-name = "ezexb._core"
+python-source = "src"
+python-packages = ["ezexb"]
+exclude = [".internal/**/*", ".venv/**/*", "dist/**/*", "**/__pycache__/**/*", "**/*.pyc"]
+include = [
+  { path = "LICENSE", format = ["sdist", "wheel"] },
+  { path = "Cargo.lock", format = "sdist" },
+  { path = "tests/**/*", format = "sdist" },
+  { path = "scripts/**/*", format = "sdist" },
+  { path = "docs/**/*", format = "sdist" },
+  { path = "uv.lock", format = "sdist" },
+]
+
+[tool.uv]
+cache-keys = [
+  { file = "pyproject.toml" },
+  { file = "Cargo.toml" },
+  { file = "Cargo.lock" },
+  { file = "crates/**/*.toml" },
+  { file = "crates/**/*.rs" },
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python", "tests/tooling"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
