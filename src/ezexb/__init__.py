@@ -139,6 +139,9 @@ def capabilities() -> dict[str, object]:
             "16.4.0.13104",
             "18.0.0.18159",
         ],
+        # Other builds of these majors are read with the same rules plus an
+        # ``unverified_product_build`` diagnostic.
+        "qualified_product_majors": [10, 18],
         "world_coordinate_flattening": True,
         "portable_svg_preview": True,
         "text_style_reading": True,

@@ -68,6 +68,10 @@ pub struct NurbsGeometry {
     pub planar_type_raw: u32,
     pub control_points: Vec<[f64; 4]>,
     pub knots: Vec<f64>,
+    /// Save major >= 15 only: the stored fit-point count (always -1, none) and
+    /// fit tolerance that precede the curve.
+    pub fit_point_count_raw: Option<i32>,
+    pub fit_tolerance: Option<f64>,
     pub span: SourceSpan,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -168,6 +172,11 @@ pub struct FillSettings {
 pub struct HatchGeometry {
     pub boundary: FillBoundary,
     pub pattern: HatchPattern,
+    /// Counted 3D point list that some writers (field files of builds 16.0–18.0,
+    /// including other files of verified builds) store before the boundary;
+    /// observed as pairs forming the pre-computed hatch-line segments, possibly
+    /// empty. `None` for the plain layout of the verified samples. Not rendered.
+    pub line_cache_points: Option<Vec<[f64; 3]>>,
     pub span: SourceSpan,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -319,7 +328,7 @@ pub(crate) fn decode_complex(
     Some((|| {
         if !matches!(
             (profile, major),
-            (RecordProfile::Schema3Attributes33, 10 | 11 | 15 | 16)
+            (RecordProfile::Schema3Attributes33, 10..=17)
                 | (RecordProfile::Schema3Attributes37, 18)
         ) {
             return Err("Unsupported complex save-version profile.".into());
@@ -349,12 +358,21 @@ pub(crate) fn decode_complex(
             used: 0,
         };
         let geometry = if header.type_id == NURBS {
-            if major >= 15 {
-                return Err(
-                    "NURBS fit-point preamble for save major >=15 is not qualified.".into(),
-                );
-            }
             let s = c.pos;
+            // Save major >= 15 stores a fit-point section before the curve: an i32
+            // fit-point count and an f64 fit tolerance (0.1 on every field record).
+            // Only the empty section (count -1) is qualified: all 21,853 standalone
+            // NURBS of builds 15.0–17.0 seen in 2026-10 carry it, followed by the
+            // build 10/11 layout (the plane's offset is then a signed zero).
+            let (fit_point_count_raw, fit_tolerance) = if major >= 15 {
+                let count = c.u()? as i32;
+                if count != -1 {
+                    return Err("NURBS fit points for save major >=15 are not qualified.".into());
+                }
+                (Some(count), Some(c.f()?))
+            } else {
+                (None, None)
+            };
             let BoundaryGeometry::Nurbs {
                 plane,
                 degree,
@@ -373,6 +391,8 @@ pub(crate) fn decode_complex(
                 planar_type_raw,
                 control_points,
                 knots,
+                fit_point_count_raw,
+                fit_tolerance,
                 span: c.span(s),
             })
         } else if header.type_id == ELLIPSE {
@@ -405,28 +425,41 @@ pub(crate) fn decode_complex(
             ComplexGeometry::Symbol(symbol(&mut c, header, profile, major)?)
         } else if DIMS.contains(&header.type_id.as_str()) {
             ComplexGeometry::Dimension(dimension(&mut c, header, profile, major)?)
+        } else if header.type_id == HATCH {
+            // The verified samples store the boundary first. Field files of builds
+            // 16.0–18.0 (also other files of verified builds) prefix it with a counted
+            // list of cached hatch-line points, so a whole file's hatches overflowed the
+            // record budget with a garbage count (2026-10). Try the plain layout first and
+            // retry with the prefix only when the plain layout cannot account for the body.
+            // Build 18.0.0.17670 field files (13 hatches, 2026-10) put one more
+            // zero word before the cached list; it is required to be zero.
+            let geomstart = c.pos;
+            let used = c.used;
+            let mut result = hatch(&mut c, major, geomstart, end, HatchLayout::Plain);
+            for layout in [HatchLayout::Cached, HatchLayout::ZeroThenCached] {
+                if result.is_ok() {
+                    break;
+                }
+                c.pos = geomstart;
+                c.used = used;
+                if let Ok(geometry) = hatch(&mut c, major, geomstart, end, layout) {
+                    result = Ok(geometry);
+                }
+            }
+            ComplexGeometry::Hatch(result?)
         } else {
             let geomstart = c.pos;
             let boundary = boundary(&mut c, major)?;
-            if header.type_id == HATCH {
-                let pattern = pattern(&mut c)?;
-                ComplexGeometry::Hatch(HatchGeometry {
-                    boundary,
-                    pattern,
-                    span: c.span(geomstart),
-                })
+            let gradient = if major > 10 {
+                Some(gradient(&mut c)?)
             } else {
-                let gradient = if major > 10 {
-                    Some(gradient(&mut c)?)
-                } else {
-                    None
-                };
-                ComplexGeometry::Solid(SolidGeometry {
-                    boundary,
-                    gradient,
-                    span: c.span(geomstart),
-                })
-            }
+                None
+            };
+            ComplexGeometry::Solid(SolidGeometry {
+                boundary,
+                gradient,
+                span: c.span(geomstart),
+            })
         };
         if c.pos != end {
             return Err("Unsupported trailing complex body bytes.".into());
@@ -496,6 +529,11 @@ impl Cursor<'_> {
     }
     fn count(&mut self) -> Result<u32, ComplexError> {
         let n = self.u()?;
+        // Every counted element occupies at least one byte: a larger count is a
+        // layout mismatch, reported as unsupported rather than as budget exhaustion
+        if u64::from(n) > (self.data.len() - self.pos) as u64 {
+            return Err("Counted elements exceed the remaining complex body.".into());
+        }
         self.budget(n as u64)?;
         Ok(n)
     }
@@ -539,6 +577,41 @@ fn planar(v: [f64; 3]) -> Result<[f64; 3], ComplexError> {
     }
     Ok(v)
 }
+#[derive(Clone, Copy)]
+enum HatchLayout {
+    Plain,
+    Cached,
+    ZeroThenCached,
+}
+fn hatch(
+    c: &mut Cursor<'_>,
+    major: u32,
+    start: usize,
+    end: usize,
+    layout: HatchLayout,
+) -> Result<HatchGeometry, ComplexError> {
+    let line_cache_points = match layout {
+        HatchLayout::Plain => None,
+        HatchLayout::Cached => Some(c.points()?),
+        HatchLayout::ZeroThenCached => {
+            if c.u()? != 0 {
+                return Err("Nonzero hatch cache prefix word.".into());
+            }
+            Some(c.points()?)
+        }
+    };
+    let boundary = boundary(c, major)?;
+    let pattern = pattern(c)?;
+    if c.pos != end {
+        return Err("Unsupported trailing complex body bytes.".into());
+    }
+    Ok(HatchGeometry {
+        boundary,
+        pattern,
+        line_cache_points,
+        span: c.span(start),
+    })
+}
 fn boundary(c: &mut Cursor<'_>, major: u32) -> Result<FillBoundary, ComplexError> {
     let start = c.pos;
     let pick_point = c.v()?;
@@ -571,12 +644,41 @@ fn boundary(c: &mut Cursor<'_>, major: u32) -> Result<FillBoundary, ComplexError
         let s = c.pos;
         let associated_raw = c.u()?;
         let relation_flags_raw = c.u()?;
-        // ICxDbLoopRelation.Load22: flags, two counted association maps, tail.
-        if c.count()? != 0 {
-            return Err("Nonempty fill loop association map is not qualified.".into());
+        // ICxDbLoopRelation.Load22: flags, two counted association maps, tail. The
+        // maps use the CxDbLoopRelation encoding of `records::relation`: per group a
+        // counted list of (reference, presence, [count, identifiers, terminal]) entries,
+        // then per group a counted list of 8-byte pairs. Field files of builds
+        // 12.5–17.0 (2026-10) fill them with the source entities of every loop; the
+        // entries are consumed, not interpreted, and stay inside `settings.span`.
+        let groups = c.count()?;
+        for _ in 0..groups {
+            let entries = c.count()?;
+            for _ in 0..entries {
+                c.u()?; // Referenced identifier or curve index.
+                match c.u8()? {
+                    0 => {}
+                    1 => {
+                        let identifiers = c.count()?;
+                        for _ in 0..identifiers {
+                            c.u()?;
+                        }
+                        c.u()?; // Terminal identifier.
+                    }
+                    other => {
+                        return Err(
+                            format!("Unsupported fill loop association presence {other}.").into(),
+                        );
+                    }
+                }
+            }
         }
-        if c.count()? != 0 {
-            return Err("Nonempty fill loop reference map is not qualified.".into());
+        let groups = c.count()?;
+        for _ in 0..groups {
+            let pairs = c.count()?;
+            for _ in 0..pairs {
+                c.u()?;
+                c.u()?;
+            }
         }
         let relation_tail_raw = c.u()?;
         let evaluation = c.v()?;
@@ -1123,11 +1225,160 @@ mod tests {
         assert!(decode(&b, HATCH, ParseOptions::default()).is_err())
     }
     #[test]
+    fn hatch_cached_line_prefix_is_read_when_the_plain_layout_does_not_fit() {
+        let mut plain = body();
+        plain.extend_from_slice(&[0; 32]);
+        for v in [2., 45., 0.] {
+            f(&mut plain, v)
+        }
+        u(&mut plain, 0);
+        let ComplexGeometry::Hatch(h) = decode(&plain, HATCH, ParseOptions::default())
+            .unwrap()
+            .geometry
+        else {
+            panic!()
+        };
+        assert_eq!(h.line_cache_points, None);
+        // Field files of builds 16.0–18.0 store a counted point list before the pick point
+        let fill = &plain[attrs().len()..];
+        let mut cached = attrs();
+        u(&mut cached, 2);
+        for v in [10., 20., 0., 30., 40., 0.] {
+            f(&mut cached, v)
+        }
+        cached.extend_from_slice(fill);
+        let decoded = decode(&cached, HATCH, ParseOptions::default()).unwrap();
+        assert_eq!(decoded.budget_used, 4);
+        let ComplexGeometry::Hatch(h) = decoded.geometry else {
+            panic!()
+        };
+        assert_eq!(
+            h.line_cache_points.as_deref(),
+            Some(&[[10., 20., 0.], [30., 40., 0.]][..])
+        );
+        assert_eq!(h.boundary.loops.len(), 1);
+        assert_eq!(h.span.offset, attrs().len() as u64);
+        assert_eq!(h.span.length, (cached.len() - attrs().len()) as u64);
+        // An empty cache is a 4-byte prefix
+        let mut empty = attrs();
+        u(&mut empty, 0);
+        empty.extend_from_slice(fill);
+        let ComplexGeometry::Hatch(h) = decode(&empty, HATCH, ParseOptions::default())
+            .unwrap()
+            .geometry
+        else {
+            panic!()
+        };
+        assert_eq!(h.line_cache_points.as_deref(), Some(&[][..]));
+        // Truncation stays an error and SOLID never takes the prefix
+        assert!(decode(&cached[..cached.len() - 1], HATCH, ParseOptions::default()).is_err());
+        assert!(decode(&cached, SOLID, ParseOptions::default()).is_err());
+        // Build 18.0.0.17670 field files put one more zero word before the cached list
+        let mut zeroed = attrs();
+        u(&mut zeroed, 0);
+        zeroed.extend_from_slice(&cached[attrs().len()..]);
+        let ComplexGeometry::Hatch(h) = decode(&zeroed, HATCH, ParseOptions::default())
+            .unwrap()
+            .geometry
+        else {
+            panic!()
+        };
+        assert_eq!(
+            h.line_cache_points.as_deref(),
+            Some(&[[10., 20., 0.], [30., 40., 0.]][..])
+        );
+        let mut nonzero = attrs();
+        u(&mut nonzero, 1);
+        nonzero.extend_from_slice(&cached[attrs().len()..]);
+        assert!(decode(&nonzero, HATCH, ParseOptions::default()).is_err());
+    }
+    #[test]
+    fn hatch_fill_loop_association_maps_are_consumed() {
+        // Build 16.0 field file: one association group with one entry (presence 1, no
+        // identifiers, a terminal entity id) and one reference group with one pair.
+        let mut filled = Vec::new();
+        u(&mut filled, 1);
+        u(&mut filled, 1);
+        u(&mut filled, 0xfffffff9);
+        filled.push(1);
+        u(&mut filled, 0);
+        u(&mut filled, 5834);
+        u(&mut filled, 1);
+        u(&mut filled, 1);
+        u(&mut filled, 1);
+        u(&mut filled, 0);
+        let mut empty = Vec::new();
+        u(&mut empty, 0);
+        u(&mut empty, 0);
+        let build = |maps: &[u8]| {
+            let mut b = body();
+            u(&mut b, 0);
+            u(&mut b, 0x80800000);
+            b.extend_from_slice(maps);
+            u(&mut b, 0);
+            for v in [0., 0., 0., 0., 0., 1.] {
+                f(&mut b, v)
+            }
+            for _ in 0..5 {
+                u(&mut b, 0)
+            }
+            for _ in 0..3 {
+                f(&mut b, 0.)
+            }
+            u(&mut b, 0);
+            f(&mut b, 0.);
+            u(&mut b, 0);
+            b.extend_from_slice(&[0; 32]);
+            for v in [2., 45., 0.] {
+                f(&mut b, v)
+            }
+            u(&mut b, 0);
+            b
+        };
+        let at = |bytes: &[u8]| {
+            decode_complex(
+                bytes,
+                &header(HATCH, bytes.len()),
+                RecordProfile::Schema3Attributes33,
+                16,
+                ParseOptions::default(),
+            )
+            .unwrap()
+        };
+        for (maps, label) in [(&empty, "empty"), (&filled, "filled")] {
+            let b = build(maps);
+            let decoded = at(&b).unwrap_or_else(|e| panic!("{label}: {e:?}"));
+            let ComplexGeometry::Hatch(h) = decoded.geometry else {
+                panic!()
+            };
+            assert_eq!(h.boundary.loops.len(), 1);
+            let settings = h.boundary.settings.as_ref().unwrap();
+            assert_eq!(settings.relation_flags_raw, 0x80800000);
+            assert_eq!(settings.normal, [0., 0., 1.]);
+            for end in 0..b.len() {
+                assert!(at(&b[..end]).is_err(), "{label} {end}");
+            }
+        }
+        let mut bad = filled.clone();
+        bad[12] = 2; // An unknown presence value stays unsupported.
+        assert!(at(&build(&bad)).is_err());
+    }
+    #[test]
     fn untrusted_counts_and_unknown_curve_fail_closed() {
+        // A count larger than the remaining body is a layout mismatch (unsupported);
+        // a count within the body but over the budget is still a limit error
         let mut b = body();
         b[61..65].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode(&b, SOLID, ParseOptions::default()),
+            Err(ComplexError::Unsupported(_))
+        ));
+        let tiny = ParseOptions {
+            max_records: 1,
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            decode(&body(), SOLID, tiny),
             Err(ComplexError::Limit(_))
         ));
         let mut b = body();
@@ -1423,7 +1674,7 @@ mod tests {
         b[37..41].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             decode(&b, GEOMETRIC_TOLERANCE, ParseOptions::default()),
-            Err(ComplexError::Limit(_))
+            Err(ComplexError::Unsupported(_))
         ));
         let (mut b, _) = symbol_body(GEOMETRIC_TOLERANCE);
         b[41..49].copy_from_slice(&f64::NAN.to_le_bytes());
@@ -1582,5 +1833,69 @@ mod tests {
         assert!(decode(&b, ELLIPSE, ParseOptions::default()).is_ok());
         b[49..57].copy_from_slice(&1_f64.to_le_bytes());
         assert!(decode(&b, ELLIPSE, ParseOptions::default()).is_err());
+    }
+    #[test]
+    fn standalone_nurbs_of_save_major_15_reads_the_empty_fit_point_section() {
+        let mut b = attrs();
+        u(&mut b, u32::MAX); // Fit-point count -1: no fit points stored.
+        f(&mut b, 0.1); // Fit tolerance.
+        for v in [0., 0., 1., -0.] {
+            f(&mut b, v);
+        }
+        for v in [2, 1, 1015, 1030] {
+            u(&mut b, v);
+        }
+        for v in [0., 0., 0., 1., 2., 3., 0., 1., 0., 0., 1., 1.] {
+            f(&mut b, v);
+        }
+        let at = |bytes: &[u8], major: u32| {
+            decode_complex(
+                bytes,
+                &header(NURBS, bytes.len()),
+                RecordProfile::Schema3Attributes33,
+                major,
+                ParseOptions::default(),
+            )
+            .unwrap()
+        };
+        for major in [15, 17] {
+            let ComplexGeometry::Nurbs(n) = at(&b, major).unwrap().geometry else {
+                panic!()
+            };
+            assert_eq!(n.control_points, vec![[0., 0., 0., 1.], [2., 3., 0., 1.]]);
+            assert_eq!(n.knots, vec![0., 0., 1., 1.]);
+            assert_eq!(n.plane, [0., 0., 1., -0.]);
+            assert_eq!(n.fit_point_count_raw, Some(-1));
+            assert_eq!(n.fit_tolerance, Some(0.1));
+            assert_eq!((n.type_raw, n.planar_type_raw), (1015, 1030));
+        }
+        for end in 0..b.len() {
+            assert!(at(&b[..end], 15).is_err(), "{end}");
+        }
+        // A stored fit-point list is not qualified; build 11 has no section at all.
+        b[33..37].copy_from_slice(&0u32.to_le_bytes());
+        let error = at(&b, 15).unwrap_err();
+        assert!(format!("{error:?}").contains("fit points"), "{error:?}");
+        let ComplexGeometry::Nurbs(n) = decode(&attrs_nurbs_11(), NURBS, ParseOptions::default())
+            .unwrap()
+            .geometry
+        else {
+            panic!()
+        };
+        assert_eq!((n.fit_point_count_raw, n.fit_tolerance), (None, None));
+    }
+
+    fn attrs_nurbs_11() -> Vec<u8> {
+        let mut b = attrs();
+        for v in [0., 0., 1., 0.] {
+            f(&mut b, v);
+        }
+        for v in [2, 1, 1016, 0] {
+            u(&mut b, v);
+        }
+        for v in [0., 0., 0., 1., 2., 3., 0., 1., 0., 0., 1., 1.] {
+            f(&mut b, v);
+        }
+        b
     }
 }

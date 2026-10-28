@@ -163,15 +163,10 @@ impl From<Error> for ContextError {
 }
 type ContextResult<T> = Result<T, ContextError>;
 
+/// Major of a build inside the qualified range (see `crate::build`); the
+/// decoders branch on the major only.
 fn major(build: &str) -> Option<u32> {
-    match build {
-        "10.0.0.0000" => Some(10),
-        "11.7.0.5203" => Some(11),
-        "15.0.0.5681" => Some(15),
-        "16.4.0.13104" => Some(16),
-        "18.0.0.18159" => Some(18),
-        _ => None,
-    }
+    crate::build::qualified_major(build)
 }
 
 fn guid(r: &mut Reader<'_>) -> Result<String, Error> {
@@ -211,10 +206,11 @@ fn budget(used: &mut u64, count: u64, options: ParseOptions) -> Result<(), Error
 }
 fn count(r: &mut Reader<'_>, used: &mut u64, minimum: usize) -> Result<usize, Error> {
     let count = r.u32()? as usize;
-    budget(used, count as u64, r.options)?;
+    // An impossible count is a stream error, not budget exhaustion
     if count > (r.data.len() - r.offset) / minimum {
         return Err(invalid("context count exceeds remaining stream bytes"));
     }
+    budget(used, count as u64, r.options)?;
     Ok(count)
 }
 
@@ -226,35 +222,56 @@ fn skip_properties(r: &mut Reader<'_>, used: &mut u64) -> ContextResult<bool> {
         let values = count(r, used, 1)?;
         values_present |= values != 0;
         for _ in 0..values {
-            let tag = r.take(1)?[0];
-            if tag == 12 {
-                r.take(16)?;
-                let size = r.u32()? as usize;
-                r.take(size)?;
-                continue;
-            }
-            let width = match tag {
-                0 | 7 => 0,
-                1 => 1,
-                2 | 4 | 5 => 4,
-                6 => 8,
-                8 => 2,
-                9 => 24,
-                _ => {
-                    return Err(ContextError::Unsupported(format!(
-                        "Unknown context property tag {tag}"
-                    )))
-                }
-            };
-            text(r)?;
-            if tag == 7 {
-                text(r)?;
-            } else {
-                r.take(width)?;
-            }
+            skip_property_value(r, used, 0)?;
         }
     }
     Ok(values_present)
+}
+
+/// Same value encoding as `records::property_value`: tag 10 is a counted list of
+/// nested values (CX_LAYOUTDATA, CX_SPECLIB_TXTINFO), tag 3 a four-byte flag.
+fn skip_property_value(r: &mut Reader<'_>, used: &mut u64, depth: u64) -> ContextResult<()> {
+    ParseOptions::check_limit(
+        "max_record_depth",
+        depth,
+        r.options.max_record_depth.min(64),
+    )?;
+    let tag = r.take(1)?[0];
+    if tag == 12 {
+        r.take(16)?;
+        let size = r.u32()? as usize;
+        r.take(size)?;
+        return Ok(());
+    }
+    let width = match tag {
+        0 | 7 | 10 => 0,
+        1 => 1,
+        2..=5 => 4,
+        6 => 8,
+        8 => 2,
+        9 => 24,
+        _ => {
+            return Err(ContextError::Unsupported(format!(
+                "Unknown context property tag {tag}"
+            )))
+        }
+    };
+    text(r)?;
+    match tag {
+        7 => {
+            text(r)?;
+        }
+        10 => {
+            let nested = count(r, used, 1)?;
+            for _ in 0..nested {
+                skip_property_value(r, used, depth + 1)?;
+            }
+        }
+        _ => {
+            r.take(width)?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -737,11 +754,7 @@ pub(crate) fn decode_block_context_with_budget(
                             Some(embedded_record(&mut r, &mut result.budget_used, SOLID, 1)?.0);
                         let record = block.solid_attachment.as_ref().unwrap();
                         let header = embedded_header(record);
-                        let profile = if major == 18 {
-                            crate::RecordProfile::Schema3Attributes37
-                        } else {
-                            crate::RecordProfile::Schema3Attributes33
-                        };
+                        let profile = crate::RecordProfile::for_major(major);
                         let remaining = ParseOptions {
                             max_records: options.max_records.saturating_sub(result.budget_used),
                             max_record_depth: options.max_record_depth.saturating_sub(1),
@@ -900,7 +913,7 @@ pub fn decode_insert(
     Some((|| {
         let major = major(product_build).ok_or("Unqualified INSERT product build")?;
         let width = match (profile, major) {
-            (crate::RecordProfile::Schema3Attributes33, 10 | 11 | 15 | 16) => 33,
+            (crate::RecordProfile::Schema3Attributes33, 10..=17) => 33,
             (crate::RecordProfile::Schema3Attributes37, 18) => 37,
             _ => return Err("Unqualified INSERT attribute profile".into()),
         };
@@ -1211,7 +1224,7 @@ pub fn decode_attribute_definition(
         let major = major(product_build).ok_or("Unqualified attribute-definition product build")?;
         let qualified = matches!(
             (profile, major),
-            (crate::RecordProfile::Schema3Attributes33, 10 | 11 | 15 | 16)
+            (crate::RecordProfile::Schema3Attributes33, 10..=17)
                 | (crate::RecordProfile::Schema3Attributes37, 18)
         );
         if !qualified || !matches!(header.object_schema, 1 | 100) || header.extension.is_some() {

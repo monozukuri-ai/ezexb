@@ -4,6 +4,7 @@
 mod annotation;
 mod attributes;
 mod bom;
+mod build;
 mod complex;
 mod compression;
 mod container;
@@ -38,6 +39,7 @@ pub use annotation::{
 };
 pub use attributes::*;
 pub use bom::*;
+pub use build::*;
 pub use complex::*;
 pub use compression::{
     decode_stream_payload, DecodedStream, StreamPayloadBlock, StreamPayloadInfo,

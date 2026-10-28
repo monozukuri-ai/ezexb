@@ -7,6 +7,19 @@ are separate Rust operations; these models preserve stored data and diagnostics.
 from __future__ import annotations
 
 import json
+
+try:  # orjson parses the native JSON several times faster when it is installed.
+    import orjson as _orjson
+
+    def _loads(value: str) -> Any:
+        return _orjson.loads(value)
+
+except ImportError:  # pragma: no cover - exercised only without orjson
+
+    def _loads(value: str) -> Any:
+        return json.loads(value)
+
+
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -170,6 +183,11 @@ class StoredText:
     format_type_id: str | None
     formatting_span: SourceSpan
     span: SourceSpan
+    # Save major >= 15 only: the stored column layout, kept raw and not applied.
+    column_flags_raw: tuple[int, int, int] | None = None
+    column_width: float | None = None
+    column_count: int | None = None
+    column_entries_raw: tuple[tuple[float, float], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -446,10 +464,8 @@ class Document:
         raise KeyError(space_id)
 
 
-def _convert(cls: type, value: dict[str, Any]) -> Any:
-    """Convert explicitly registered nested types; preserve all Rust fields."""
-    value = dict(value)
-    for key in (
+_SPAN_KEYS = frozenset(
+    (
         "span",
         "payload_span",
         "property_span",
@@ -457,10 +473,10 @@ def _convert(cls: type, value: dict[str, Any]) -> Any:
         "unparsed_span",
         "contents_span",
         "formatting_span",
-    ):
-        if key in value and value[key] is not None:
-            value[key] = SourceSpan(**value[key])
-    for key in (
+    )
+)
+_TEXT_KEYS = frozenset(
+    (
         "name",
         "description",
         "alternate_name",
@@ -473,15 +489,10 @@ def _convert(cls: type, value: dict[str, Any]) -> Any:
         "western_font",
         "cjk_font",
         "shape_file_path",
-    ):
-        if key in value and value[key] is not None:
-            text = dict(value[key])
-            text["span"] = SourceSpan(**text["span"])
-            value[key] = TextField(**text)
-    for key in ("unknown_fields",):
-        if key in value:
-            value[key] = tuple(SourceSpan(**span) for span in value[key])
-    for key in (
+    )
+)
+_TUPLE_KEYS = frozenset(
+    (
         "start",
         "end",
         "center",
@@ -495,9 +506,30 @@ def _convert(cls: type, value: dict[str, Any]) -> Any:
         "scales",
         "matrix_stored",
         "extra_flags_raw",
-    ):
-        if key in value and value[key] is not None:
-            value[key] = tuple(value[key])
+        "column_flags_raw",
+    )
+)
+
+
+def _convert(cls: type, value: dict[str, Any]) -> Any:
+    """Convert explicitly registered nested types; preserve all Rust fields."""
+    # One pass over the stored keys: a 170k-entity file spends most of its read time
+    # here, so the key sets are looked up rather than probed one by one.
+    converted: dict[str, Any] = {}
+    for key, item in value.items():
+        if item is not None:
+            if key in _SPAN_KEYS:
+                item = SourceSpan(**item)
+            elif key in _TEXT_KEYS:
+                item = TextField(**{**item, "span": SourceSpan(**item["span"])})
+            elif key in _TUPLE_KEYS:
+                item = tuple(item)
+            elif key == "unknown_fields":
+                item = tuple(SourceSpan(**span) for span in item)
+            elif key in ("line_cache_points", "column_entries_raw"):
+                item = tuple(tuple(p) for p in item)
+        converted[key] = item
+    value = converted
     if cls in (StyleContext, SpaceContext, ReadReport):
         types = {
             "layers": Layer,
@@ -546,7 +578,7 @@ def _report(value: str | dict[str, Any]) -> ReadReport:
 def _document(value: str) -> Document:
     from .content import _property_group
 
-    data = json.loads(value)
+    data = _loads(value)
     data["file_info"] = _file_info(json.dumps(data["file_info"]))
     data["styles"] = _convert(StyleContext, data["styles"])
     data["text_style_context"] = _convert(TextStyleContext, data["text_style_context"])

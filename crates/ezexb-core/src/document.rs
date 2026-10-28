@@ -10,13 +10,9 @@ use std::{
 };
 
 pub const READ_PROFILE: &str = "exb-stored-planar-v1";
-pub const READ_PRODUCT_BUILDS: &[&str] = &[
-    "10.0.0.0000",
-    "11.7.0.5203",
-    "15.0.0.5681",
-    "16.4.0.13104",
-    "18.0.0.18159",
-];
+/// Verified builds; other builds of majors 10–18 are read with an
+/// `unverified_product_build` diagnostic (see `crate::build`).
+pub const READ_PRODUCT_BUILDS: &[&str] = crate::build::VERIFIED_PRODUCT_BUILDS;
 const BLOCK_TYPE: &str = "b65f3081-5c0e-4d00-97b4-0c5231051af1";
 
 #[derive(Clone, Debug, Serialize)]
@@ -308,17 +304,12 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
     let file_info = decode_file_info(&file_data, budget.remaining())?;
     budget.charge(file_info.properties.len() as u64)?;
     let build = file_info.product_build.value.clone();
-    if !READ_PRODUCT_BUILDS.contains(&build.as_str()) {
+    let Some(major) = qualified_major(&build) else {
         return Err(Error::UnsupportedFeature(
             "stored-entity reader for this product build",
         ));
-    }
-    let major: u32 = build.split('.').next().unwrap().parse().unwrap();
-    let profile = if major >= 18 {
-        RecordProfile::Schema3Attributes37
-    } else {
-        RecordProfile::Schema3Attributes33
     };
+    let profile = RecordProfile::for_major(major);
     let mut report = ReadReport {
         profile: READ_PROFILE.into(),
         complete: false,
@@ -330,6 +321,18 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
         budget_used: 0,
         diagnostics: Vec::new(),
     };
+    if let Some(note) = unverified_build_note(&build, major) {
+        // Same major, different build: the layouts are expected to match, but the
+        // result is not certified by a native sample.
+        issue(
+            &mut report,
+            "unverified_product_build",
+            note,
+            Some("/*FileInfoStream"),
+            None,
+            None,
+        );
+    }
     let data = budget.payload(container, "/*StyleStream")?;
     let styles = decode_style_context(&data, &build, budget.remaining())?;
     budget.charge(styles.budget_used)?;
@@ -655,6 +658,20 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
                                 format!("Text style {} is unavailable.", text.style_id_raw),
                                 Some(path),
                                 Some(text.span.clone()),
+                                Some(record),
+                            );
+                        }
+                        if text.column_count.is_some_and(|count| count > 0) {
+                            issue(
+                                &mut report,
+                                "unsupported_text_semantics",
+                                format!(
+                                    "Stored TEXT column layout ({} column(s), width {}) is kept raw and not applied.",
+                                    text.column_count.unwrap_or(0),
+                                    text.column_width.unwrap_or(0.)
+                                ),
+                                Some(path),
+                                Some(text.formatting_span.clone()),
                                 Some(record),
                             );
                         }

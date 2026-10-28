@@ -5,10 +5,16 @@
 provides `read_file(path, options, strict)`, `read_bytes(data, options, strict)`,
 and `Container::document(strict)`. No CAXA installation is required.
 
-The profile is gated by these **exact observed product-build strings**:
-`10.0.0.0000`, `11.7.0.5203`, `15.0.0.5681`, `16.4.0.13104`, and
-`18.0.0.18159`. These strings select supported layouts; they are not an official EXB
-version specification. Unrecognized builds raise `UnsupportedFeatureError`.
+The stored-entity layouts were verified against native samples of these product
+builds: `10.0.0.0000`, `11.7.0.5203`, `15.0.0.5681`, `16.4.0.13104`, and
+`18.0.0.18159`. The decoders branch on the major number, so any other build whose
+major is between 10 and 18 (field files carry builds such as `12.5.0.5302`,
+`16.0.0.6227`, `17.1.0.15581` or `18.0.0.17670`) is read with the rules of its
+major and reports one `unverified_product_build` diagnostic naming the verified
+neighbours; strict reads therefore raise `IncompleteReadError` for them. These
+strings are not an official EXB version specification. Builds outside that major
+range, or without a dotted numeric form, raise `UnsupportedFeatureError`.
+`ezexb.capabilities()` lists both the verified builds and the qualified major range.
 
 ```python
 import ezexb
@@ -44,16 +50,16 @@ use `read()` to access the additional supported entity layouts.
 | CIRCLE / ARC | Center, radius, basis; ARC sweep and endpoints | Positive radius, orthonormal XY basis; sweep in radians, basis preserves handedness |
 | DegenerateArc | Stored center, zero radius/basis and full-turn sweep | Only the qualified zero-radius/zero-basis pattern; `degenerate_geometry` diagnostic, no inferred curve or point |
 | POLYLINE | Vertices, bulges, widths, closure and normal | Version-dependent vertex encoding; zero discarded legacy Z and default normal |
-| TEXT | Unicode, insertion, stored dimensions, rotation/scale, raw formatting; decoded font/spacing styles | Stored values remain distinct from native layout |
+| TEXT | Unicode, insertion, stored dimensions, rotation/scale, raw formatting; decoded font/spacing styles; save major >= 15 column layout kept raw (`column_*`) | Stored values remain distinct from native layout; a nonzero column count is reported as `unsupported_text_semantics` and not applied |
 | INSERT / AttributeDefinition | Block reference, components/matrix, attached tag/value/TEXT; definition tag/prompt/default/TEXT | Visibility uncertainty is explicit; clipping and unusual embedded objects remain unsupported |
-| HATCH / SOLID | Boundary loops, native curve parameters, pattern/dash data or gradient fields | Nonempty association maps remain unsupported; no fill regeneration |
+| HATCH / SOLID | Boundary loops, native curve parameters, pattern/dash data or gradient fields; a hatch's cached line points when the file stores them before the boundary (`line_cache_points`, field files of builds 16.0–18.0) | Nonempty association maps remain unsupported; no fill regeneration |
 | Dimension | Linear, diameter, radius, leader, two-line angle, chamfer, coordinate list, half, large arc, origin and pitch; stored value/text/locations and typed cached presentation | Construction, overrides and associativity remain in `unresolved_semantics_span`; read remains incomplete |
 | Symbol | Roughness, geometric tolerance, section marker and datum; selected captions, raw modes, leader/cut points and cached presentation | Build 10/15 layouts only; reference objects and remaining semantics retain spans; read remains incomplete |
 | PartNumber | Style/table references, raw modes, reference-point data, leader points, scale, item indices and cached presentations | Build 10 only, empty override map; table/style resolution and number regeneration remain unsupported |
 | Table | General/hole-chart table columns, sparse rows/cells, text/block contents, typed raw properties, placement, break data and hole-chart fields | Build 18 only; raw modes, styles, linked data and regeneration remain unresolved |
 | BomTable | External data-table reference, placement, break/rewind points and typed header/row presentations | Build 10 only; semantic cell assignments and external table lookup are unresolved |
 | View2D | Inherited block-reference fields, name, view type and absent/circular clip | Build 10 only, no attached attributes; raw clip reference bytes preserved; no view expansion or clip evaluation |
-| NURBS / ELLIPSE | Stored control points/knots or axes/radii/angular fields | NURBS build 10/11 only; no fit-point reconstruction or native tessellation |
+| NURBS / ELLIPSE | Stored control points/knots or axes/radii/angular fields; save major >= 15 adds `fit_point_count_raw`/`fit_tolerance` | Only an empty fit-point section (count -1) is qualified; no fit-point reconstruction or native tessellation |
 | Layer / linetype / text style | Names, stored color/width, dash data, Western/CJK fonts and width/spacing factors | Font files are not embedded or loaded; advanced line styles remain unsupported |
 | Space / block | Names, IDs, membership, paper scale, optional SOLID attachment | Xrefs and unsupported optional objects remain explicit |
 
@@ -103,7 +109,8 @@ stored fields decode. Block references are still checked for missing targets/cyc
 Coordinates in `read()` remain **stored block coordinates**. `document.units` is
 `None`; paper scale is not a physical-unit conversion. Raw attribute flags and color
 encodings are preserved. `entity.style` distinguishes ByLayer, ByBlock, explicit
-values and symbolic device widths. ByBlock values require an INSERT instance.
+values and symbolic device selections (width flags 0/1/7, colour and linetype
+flag 7 keep the draw helper's current selection). ByBlock values require an INSERT instance.
 A layer width flag of 0 means keeping the device width; flag 2 selects the stored float.
 
 `document.text_style_context` is a separate optional display-context result with its

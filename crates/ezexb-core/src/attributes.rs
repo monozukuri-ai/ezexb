@@ -56,6 +56,10 @@ fn ordinary<T: Copy>(
         0 => value("by_layer", layer),
         1 => inherited(block),
         2 => value("explicit", Some(stored)),
+        // Like width flag 7: the native draw helper keeps its current (device)
+        // selection. Field files of builds 12.5–18.0 store it on 20,747 records
+        // (2026-10), always with a 0x20-tagged colour word, mostly white.
+        7 => value("device", None),
         _ => value("unsupported", None),
     }
 }
@@ -272,6 +276,21 @@ mod tests {
         let result = resolve_entity_style(&attributes, Some(&layer), Some(&block));
         assert_eq!(result.style.line_width.source, "by_block_thin");
         assert_eq!(result.style.line_width.value, None);
+    }
+
+    #[test]
+    fn flag_7_keeps_the_device_selection_without_a_diagnostic() {
+        // Field files of builds 12.5–18.0: colour flag 7 with a 0x20-tagged word.
+        let mut attributes = attributes();
+        attributes.color_flag_raw = 7;
+        attributes.linetype_flag_raw = 7;
+        attributes.color_raw = 0x20ff_ffff;
+        let result = resolve_entity_style(&attributes, None, None);
+        assert_eq!(result.style.color_raw.source, "device");
+        assert_eq!(result.style.color_raw.value, None);
+        assert_eq!(result.style.linetype.source, "device");
+        assert_eq!(result.diagnostics.len(), 1, "{:?}", result.diagnostics);
+        assert_eq!(result.diagnostics[0].code, "unresolved_layer");
     }
 
     #[test]

@@ -127,6 +127,10 @@ little-endian integer. These bytes are separately exposed as `object_schema` and
 and, under the experimental profiles below, `(3, false)` and `(3, true)`.
 Property groups retain GUIDs, typed value tags, keys, and exact value spans. To
 inspect an uninterpreted value, slice `stream_payload().data` using `value_span`.
+Tag 10 values are counted lists of nested values of the same encoding (for
+example `CX_LAYOUTDATA` and `CX_SPECLIB_TXTINFO`); the outer `value_span` covers
+the count and every nested value, which are not listed separately. Tag 3 is a
+four-byte flag.
 Unknown schemas or property tags stop inspection before the entire record, without
 searching for another familiar GUID. `framing_complete` means all bytes were
 framed; `record_headers().geometry_decoded` remains false.

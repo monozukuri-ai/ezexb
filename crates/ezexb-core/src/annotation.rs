@@ -91,8 +91,14 @@ pub struct TextGeometry {
     pub line_spacing_raw: f64,
     pub line_spacing_style_raw: u32,
     pub format_type_id: Option<String>,
-    /// Version-specific formatting, color, and empty-column fields. Their raw
-    /// bytes remain available in the logical stream; layout is not reconstructed.
+    /// Save major >= 15 only: the stored column layout (flags, width, count and
+    /// one raw 16-byte entry per column). A nonzero count is not applied.
+    pub column_flags_raw: Option<[u32; 3]>,
+    pub column_width: Option<f64>,
+    pub column_count: Option<u32>,
+    pub column_entries_raw: Option<Vec<[f64; 2]>>,
+    /// Version-specific formatting, color, and column fields. Their raw bytes
+    /// remain available in the logical stream; layout is not reconstructed.
     pub formatting_span: SourceSpan,
     pub span: SourceSpan,
 }
@@ -112,7 +118,7 @@ pub(crate) fn decode_annotation(
             return Err("Unsupported annotation object schema or extension.".into());
         }
         let width = match (profile, save_major) {
-            (RecordProfile::Schema3Attributes33, 10 | 11 | 15 | 16) => 33,
+            (RecordProfile::Schema3Attributes33, 10..=17) => 33,
             (RecordProfile::Schema3Attributes37, 18) => 37,
             _ => return Err("Unsupported annotation save-version/profile combination.".into()),
         };
@@ -278,13 +284,30 @@ fn decode_text(
     } else {
         None
     };
+    let mut column_flags_raw = None;
+    let mut column_width = None;
+    let mut column_count = None;
+    let mut column_entries_raw = None;
     if major >= 15 {
-        let column_flags = [c.u32()?, c.u32()?, c.u32()?];
-        let column_width = c.f64()?;
-        let column_count = c.u32()?;
-        if column_flags != [0, 0, 0] || column_width != 0.0 || column_count != 0 {
-            return Err("Nondefault TEXT column layout is not qualified.".into());
+        // Field files of builds 15.0–17.1 (2026-10, 402 records) store a one-column
+        // layout as flags [2, 0, 0], a width, count 1 and one 16-byte entry (a
+        // double and eight zero bytes). The layout is kept raw and not applied.
+        let flags = [c.u32()?, c.u32()?, c.u32()?];
+        let width = c.f64()?;
+        let count = c.u32()?;
+        ParseOptions::check_limit("max_records", u64::from(count), options.max_records)
+            .map_err(AnnotationError::Limit)?;
+        if u64::from(count) > (c.data.len() - c.offset) as u64 / 16 {
+            return Err("TEXT column count exceeds the stored body.".into());
         }
+        let mut entries = Vec::new();
+        for _ in 0..count {
+            entries.push([c.f64()?, c.f64()?]);
+        }
+        column_flags_raw = Some(flags);
+        column_width = Some(width);
+        column_count = Some(count);
+        column_entries_raw = Some(entries);
     }
     Ok(TextGeometry {
         contents,
@@ -309,6 +332,10 @@ fn decode_text(
         line_spacing_raw,
         line_spacing_style_raw,
         format_type_id,
+        column_flags_raw,
+        column_width,
+        column_count,
+        column_entries_raw,
         formatting_span: c.span(tail_start),
         span: c.span(start),
     })
@@ -435,6 +462,46 @@ mod tests {
             b.extend([0_u8; 24]);
         }
         b
+    }
+
+    #[test]
+    fn text_keeps_a_stored_column_layout_raw() {
+        // A build 17.1 field record: flags [2, 0, 0], width 12.5, one column entry.
+        let mut b = text(17);
+        b.truncate(b.len() - 24);
+        for value in [2_u32, 0, 0] {
+            b.extend(value.to_le_bytes());
+        }
+        b.extend(12.5_f64.to_le_bytes());
+        b.extend(1_u32.to_le_bytes());
+        b.extend(9692.5_f64.to_le_bytes());
+        b.extend(0_f64.to_le_bytes());
+        let mut c = cursor(&b);
+        let t = decode_text(&mut c, 17, ParseOptions::default()).unwrap();
+        assert_eq!(c.offset, b.len());
+        assert_eq!(t.contents, "寸法Ω");
+        assert_eq!(t.column_flags_raw, Some([2, 0, 0]));
+        assert_eq!(t.column_width, Some(12.5));
+        assert_eq!(t.column_count, Some(1));
+        assert_eq!(t.column_entries_raw, Some(vec![[9692.5, 0.]]));
+        for end in 0..b.len() {
+            assert!(decode_text(&mut cursor(&b[..end]), 17, ParseOptions::default()).is_err());
+        }
+        let plain = decode_text(&mut cursor(&text(17)), 17, ParseOptions::default()).unwrap();
+        assert_eq!(
+            (plain.column_count, plain.column_width),
+            (Some(0), Some(0.))
+        );
+        assert_eq!(plain.column_entries_raw, Some(Vec::new()));
+        let legacy = decode_text(&mut cursor(&text(11)), 11, ParseOptions::default()).unwrap();
+        assert_eq!(legacy.column_count, None);
+        let huge = {
+            let mut bad = b.clone();
+            let at = bad.len() - 16 - 4;
+            bad[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            bad
+        };
+        assert!(decode_text(&mut cursor(&huge), 17, ParseOptions::default()).is_err());
     }
 
     #[test]

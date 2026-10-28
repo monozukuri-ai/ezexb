@@ -79,3 +79,24 @@ def test_cumulative_limits_and_argument_validation():
         ezexb.read_bytes(bytearray(path.read_bytes()))
     with pytest.raises(TypeError):
         ezexb.read(bytes(path))
+
+
+def test_unverified_build_of_a_qualified_major_reads_with_a_diagnostic(tmp_path):
+    # Field files carry builds such as 18.0.0.17670; same major, so the verified rules apply
+    verified = ezexb.read(DATA / "document-18.cfb")
+    needle = "18.0.0.18159".encode("utf-16-le")
+    data = (DATA / "document-18.cfb").read_bytes()
+    assert data.count(needle) == 1
+    path = tmp_path / "field.cfb"
+    path.write_bytes(data.replace(needle, "18.0.0.17670".encode("utf-16-le")))
+    doc = ezexb.read(path, strict=False)
+    assert [type(e.geometry) for e in doc.entities] == [type(e.geometry) for e in verified.entities]
+    assert [d.code for d in doc.report.diagnostics] == ["unverified_product_build"]
+    assert "18.0.0.18159" in doc.report.diagnostics[0].message
+    assert not doc.report.complete
+    with pytest.raises(ezexb.IncompleteReadError):
+        ezexb.read(path)
+    unsupported = tmp_path / "newer.cfb"
+    unsupported.write_bytes(data.replace(needle, "19.0.0.18159".encode("utf-16-le")))
+    with pytest.raises(ezexb.UnsupportedFeatureError):
+        ezexb.read(unsupported, strict=False)

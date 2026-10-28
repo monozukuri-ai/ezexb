@@ -75,6 +75,10 @@ class Nurbs:
     control_points: tuple[tuple[float, float, float, float], ...]
     knots: tuple[float, ...]
     span: SourceSpan
+    # Save major >= 15 only: the stored fit-point count (always -1, none) and fit
+    # tolerance that precede the curve; None on builds 10 and 11.
+    fit_point_count_raw: int | None = None
+    fit_tolerance: float | None = None
     kind: Literal["Nurbs"] = "Nurbs"
 
 
@@ -143,6 +147,9 @@ class Hatch:
     pattern: HatchPattern
     span: SourceSpan
     kind: Literal["Hatch"] = "Hatch"
+    #: Cached hatch-line points some writers store before the boundary (pairs form the
+    #: pre-computed segments, possibly empty). ``None`` for the plain layout. Not rendered.
+    line_cache_points: tuple[tuple[float, float, float], ...] | None = None
 
 
 @dataclass(frozen=True)

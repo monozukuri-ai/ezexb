@@ -61,11 +61,18 @@ pub enum RecordProfile {
 }
 
 impl RecordProfile {
+    /// Profile for a product build inside the qualified major range
+    /// (`crate::build::qualified_major`); builds of major 18 carry 37-byte
+    /// attributes, earlier majors 33 bytes.
     pub fn from_product_build(build: &str) -> Option<Self> {
-        match build {
-            "10.0.0.0000" | "15.0.0.5681" => Some(Self::Schema3Attributes33),
-            "18.0.0.18159" => Some(Self::Schema3Attributes37),
-            _ => None,
+        crate::build::qualified_major(build).map(Self::for_major)
+    }
+
+    pub fn for_major(major: u32) -> Self {
+        if major >= 18 {
+            Self::Schema3Attributes37
+        } else {
+            Self::Schema3Attributes33
         }
     }
 
@@ -340,12 +347,8 @@ fn record_extension(
             )));
         }
         let count = reader.u32()? as u64;
-        // Each child consumes the cumulative budget in parse_record, not twice.
-        ParseOptions::check_limit(
-            "max_records",
-            budget.saturating_add(count),
-            reader.options.max_records,
-        )?;
+        // An impossible count is a framing error, not budget exhaustion: check the
+        // remaining bytes before the budget so the report names the real cause.
         if count > (reader.data.len() - reader.offset) as u64 / 26 {
             return Err(Error::InvalidStream(format!(
                 "display record count at decoded offset {} exceeds remaining stream bytes",
@@ -353,6 +356,12 @@ fn record_extension(
             ))
             .into());
         }
+        // Each child consumes the cumulative budget in parse_record, not twice.
+        ParseOptions::check_limit(
+            "max_records",
+            budget.saturating_add(count),
+            reader.options.max_records,
+        )?;
         for _ in 0..count {
             let record = parse_record(
                 reader.data,
@@ -398,6 +407,84 @@ fn record_extension(
     })
 }
 
+/// One property value: a tag, a UTF-16 key and a tag-specific body. Tag 10 is a
+/// counted list of nested values of the same encoding (CX_LAYOUTDATA,
+/// CX_SPECLIB_TXTINFO on production files of builds 12.5 and 15.0; a zero count
+/// is the common four-byte case). Nested values are spanned, not listed, and
+/// share the record depth limit. Tag 3 carries four-byte flags such as
+/// CX_SPECLIB_TXTATTDATA_COLORFLAG inside those lists.
+fn property_value(
+    reader: &mut Reader<'_>,
+    budget: &mut u64,
+    record_start: usize,
+    depth: u64,
+) -> Result<RecordPropertyValue, FrameError> {
+    let options = reader.options;
+    ParseOptions::check_limit(
+        "max_record_depth",
+        depth,
+        options.max_record_depth.min(MAX_SAFE_RECORD_DEPTH),
+    )?;
+    let value_start = reader.offset;
+    let tag = reader.take(1)?[0];
+    let (key, object_type_id, value_span) = if tag == 12 {
+        let object_guid = reader.take(16)?.try_into().unwrap();
+        let size = reader.u32()? as usize;
+        let body_start = reader.offset;
+        reader.take(size)?;
+        (
+            None,
+            Some(uuid::Uuid::from_bytes_le(object_guid).to_string()),
+            span(body_start, reader.offset),
+        )
+    } else {
+        let width = match tag {
+            0 => 0,
+            1 => 1,
+            2..=5 => 4,
+            6 => 8,
+            7 => 0, // A validated length-prefixed UTF-16 field below.
+            8 => 2,
+            9 => 24,
+            10 => 0, // A counted list of nested values below.
+            _ => {
+                return Err(FrameError::Unsupported(format!(
+                    "Unsupported property value tag {tag} at decoded offset {value_start}; record at offset {record_start} remains unparsed; no resynchronization attempted."
+                )));
+            }
+        };
+        let key = property_text(reader)?;
+        let body_start = reader.offset;
+        if tag == 7 {
+            property_text(reader)?;
+        } else if tag == 10 {
+            let count = reader.u32()? as u64;
+            // An impossible count is a framing error, not budget exhaustion.
+            if count > (reader.data.len() - reader.offset) as u64 {
+                return Err(Error::InvalidStream(format!(
+                    "nested property value count at decoded offset {} exceeds stream",
+                    reader.offset - 4
+                ))
+                .into());
+            }
+            consume_budget(budget, count, options)?;
+            for _ in 0..count {
+                property_value(reader, budget, record_start, depth + 1)?;
+            }
+        } else {
+            reader.take(width)?;
+        }
+        (Some(key), None, span(body_start, reader.offset))
+    };
+    Ok(RecordPropertyValue {
+        tag,
+        key,
+        object_type_id,
+        span: span(value_start, reader.offset),
+        value_span,
+    })
+}
+
 fn parse_record(
     data: &[u8],
     start: usize,
@@ -439,7 +526,6 @@ fn parse_record(
     let mut property_groups = Vec::new();
     if property_presence == 1 {
         let count = reader.u32()? as u64;
-        consume_budget(budget, count, options)?;
         // Each group requires its GUID and value count, even if it is empty.
         if count > (data.len() - reader.offset) as u64 / 20 {
             return Err(Error::InvalidStream(format!(
@@ -448,11 +534,11 @@ fn parse_record(
             ))
             .into());
         }
+        consume_budget(budget, count, options)?;
         for _ in 0..count {
             let group_start = reader.offset;
             let guid = reader.take(16)?.try_into().unwrap();
             let value_count = reader.u32()? as u64;
-            consume_budget(budget, value_count, options)?;
             // Unknown tags can be diagnosed from one byte, before reading a key.
             if value_count > (data.len() - reader.offset) as u64 {
                 return Err(Error::InvalidStream(format!(
@@ -461,51 +547,10 @@ fn parse_record(
                 ))
                 .into());
             }
+            consume_budget(budget, value_count, options)?;
             let mut values = Vec::new();
             for _ in 0..value_count {
-                let value_start = reader.offset;
-                let tag = reader.take(1)?[0];
-                let (key, object_type_id, value_span) = if tag == 12 {
-                    let object_guid = reader.take(16)?.try_into().unwrap();
-                    let size = reader.u32()? as usize;
-                    let body_start = reader.offset;
-                    reader.take(size)?;
-                    (
-                        None,
-                        Some(uuid::Uuid::from_bytes_le(object_guid).to_string()),
-                        span(body_start, reader.offset),
-                    )
-                } else {
-                    let width = match tag {
-                        0 => 0,
-                        1 => 1,
-                        2 | 4 | 5 => 4,
-                        6 => 8,
-                        7 => 0, // A validated length-prefixed UTF-16 field below.
-                        8 => 2,
-                        9 => 24,
-                        _ => {
-                            return Err(FrameError::Unsupported(format!(
-                                "Unsupported property value tag {tag} at decoded offset {value_start}; record at offset {start} remains unparsed; no resynchronization attempted."
-                            )));
-                        }
-                    };
-                    let key = property_text(&mut reader)?;
-                    let body_start = reader.offset;
-                    if tag == 7 {
-                        property_text(&mut reader)?;
-                    } else {
-                        reader.take(width)?;
-                    }
-                    (Some(key), None, span(body_start, reader.offset))
-                };
-                values.push(RecordPropertyValue {
-                    tag,
-                    key,
-                    object_type_id,
-                    span: span(value_start, reader.offset),
-                    value_span,
-                });
+                values.push(property_value(&mut reader, budget, start, depth)?);
             }
             property_groups.push(RecordPropertyGroup {
                 type_id: uuid::Uuid::from_bytes_le(guid).to_string(),
@@ -1014,6 +1059,116 @@ mod tests {
         bytes
     }
 
+    fn property(tag: u8, key: &str, body: &[u8]) -> Vec<u8> {
+        let key: Vec<u8> = format!("{key}\0")
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut bytes = vec![tag];
+        bytes.extend((key.len() as u32).to_le_bytes());
+        bytes.extend(&key);
+        bytes.extend(body);
+        bytes
+    }
+
+    fn nested_list(key: &str, children: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = (children.len() as u32).to_le_bytes().to_vec();
+        for child in children {
+            body.extend(child);
+        }
+        property(10, key, &body)
+    }
+
+    #[test]
+    fn property_value_tag_10_with_a_zero_count_is_four_bytes() {
+        // CX_LAYOUTDATA on field files of builds 12.5 and 15.0: an empty list.
+        let values = nested_list("CX_LAYOUTDATA", &[]);
+        let mut data = header();
+        append_extended_record(&mut data, 1, &one_group(&values, 1), &[1, 2, 3]);
+        let result = inspect_record_headers(&data, ParseOptions::default()).unwrap();
+        assert!(result.framing_complete, "{:?}", result.stop_reason);
+        let value = &result.records[0].property_groups[0].values[0];
+        assert_eq!(value.tag, 10);
+        assert_eq!(value.key.as_ref().unwrap().value, "CX_LAYOUTDATA");
+        assert_eq!(value.value_span.length, 4);
+        assert_eq!(result.records[0].payload_span.length, 3);
+    }
+
+    #[test]
+    fn property_value_tag_10_frames_nested_lists_and_tag_3_flags() {
+        // CX_SPECLIB_TXTINFO on a build 15.0 field file nests lists three deep and
+        // carries four-byte tag-3 flags; the outer value spans every nested byte.
+        let inner = nested_list(
+            "CX_SPECLIB_TXTATTDATA",
+            &[property(
+                3,
+                "CX_SPECLIB_TXTATTDATA_COLORFLAG",
+                &[1, 0, 0, 0],
+            )],
+        );
+        let text: Vec<u8> = "1\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut text_body = (text.len() as u32).to_le_bytes().to_vec();
+        text_body.extend(&text);
+        let collection = nested_list(
+            "CX_SPECLIB_TXTCONTENTEXTDATACOLL",
+            &[
+                property(7, "CX_SPECLIB_TXTEXTDATA_STRING", &text_body),
+                property(2, "CX_SPECLIB_TXTEXTDATA_HIDEFLAG", &[0; 4]),
+                inner,
+            ],
+        );
+        let values = nested_list("CX_SPECLIB_TXTINFO", &[collection]);
+        let mut data = header();
+        append_extended_record(&mut data, 1, &one_group(&values, 1), &[1, 2, 3]);
+        append_record(&mut data, 1, &[0; 81]);
+        let result = inspect_record_headers(&data, ParseOptions::default()).unwrap();
+        assert!(result.framing_complete, "{:?}", result.stop_reason);
+        assert_eq!(result.records.len(), 2);
+        let group = &result.records[0].property_groups[0];
+        assert_eq!(
+            group.values.len(),
+            1,
+            "nested values are spanned, not listed"
+        );
+        let value = &group.values[0];
+        assert_eq!(value.tag, 10);
+        assert_eq!(value.key.as_ref().unwrap().value, "CX_SPECLIB_TXTINFO");
+        let key_bytes = 1 + 4 + "CX_SPECLIB_TXTINFO\0".len() * 2;
+        assert_eq!(value.value_span.length as usize, values.len() - key_bytes);
+        assert_eq!(result.records[0].payload_span.length, 3);
+        assert_eq!(result.records[1].payload_span.length, 81);
+    }
+
+    #[test]
+    fn property_value_tag_10_count_is_checked_against_the_stream() {
+        let values = property(10, "CX_SPECLIB_TXTINFO", &u32::MAX.to_le_bytes());
+        let mut data = header();
+        append_extended_record(&mut data, 1, &one_group(&values, 1), &[1, 2, 3]);
+        let error = inspect_record_headers(&data, ParseOptions::default()).unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidStream(ref message) if message.contains("nested property value count")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn property_value_nesting_shares_the_record_depth_limit() {
+        let mut values = property(3, "FLAG", &[0; 4]);
+        for level in 0..4 {
+            values = nested_list(&format!("L{level}"), &[values]);
+        }
+        let mut data = header();
+        append_extended_record(&mut data, 1, &one_group(&values, 1), &[1, 2, 3]);
+        let result = inspect_record_headers(&data, ParseOptions::default()).unwrap();
+        assert!(result.framing_complete, "{:?}", result.stop_reason);
+        let options = ParseOptions {
+            max_record_depth: 2,
+            ..ParseOptions::default()
+        };
+        let error = inspect_record_headers(&data, options).unwrap_err();
+        assert!(error.to_string().contains("max_record_depth"), "{error:?}");
+    }
+
     fn relation_fixtures() -> Vec<Vec<u8>> {
         let mut single = guid_bytes("62691bae-8d34-4142-a32f-b5e5ba30d444").to_vec();
         single.extend(0x11223344u32.to_le_bytes());
@@ -1073,13 +1228,21 @@ mod tests {
             RecordProfile::from_product_build("18.0.0.18159"),
             Some(RecordProfile::Schema3Attributes37)
         );
-        for build in [
-            "10",
-            "10.0.0.0001",
-            "18.0.0.18159 ",
-            "Synthetic Build",
-            "27.0.0.21423",
-        ] {
+        // Other builds of a qualified major share its profile; builds outside the
+        // qualified range or without a dotted numeric form have none
+        assert_eq!(
+            RecordProfile::from_product_build("10.0.0.0001"),
+            profile33()
+        );
+        assert_eq!(
+            RecordProfile::from_product_build("17.1.0.15581"),
+            profile33()
+        );
+        assert_eq!(
+            RecordProfile::from_product_build("18.0.0.17670"),
+            Some(RecordProfile::Schema3Attributes37)
+        );
+        for build in ["10", "18.0.0.18159 ", "Synthetic Build", "27.0.0.21423"] {
             assert_eq!(RecordProfile::from_product_build(build), None);
         }
         let mut data = header();

@@ -50,6 +50,69 @@ fn complete_profile_preserves_stored_geometry_and_membership_for_all_builds() {
         assert_eq!(insert.insertion, [20., 30., 0.]);
     }
 }
+fn with_build(base: &[u8], from: &str, to: &str) -> Vec<u8> {
+    let utf16 = |s: &str| {
+        s.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>()
+    };
+    let (needle, replacement) = (utf16(from), utf16(to));
+    assert_eq!(needle.len(), replacement.len());
+    fixture::mutate_stream(base, "/*FileInfoStream", |data| {
+        let at = data
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        data[at..at + needle.len()].copy_from_slice(&replacement);
+    })
+}
+#[test]
+fn unverified_builds_of_a_qualified_major_read_with_a_diagnostic() {
+    let base = fixture::fixture(16);
+    let verified = read_bytes(&base, ParseOptions::default(), true).unwrap();
+    let field = with_build(&base, "16.4.0.13104", "16.4.0.12833");
+    let doc = read_bytes(&field, ParseOptions::default(), false).unwrap();
+    assert_eq!(doc.entities.len(), verified.entities.len());
+    assert_eq!(doc.blocks.len(), verified.blocks.len());
+    assert_eq!(doc.report.diagnostics.len(), 1);
+    let diagnostic = &doc.report.diagnostics[0];
+    assert_eq!(diagnostic.code, "unverified_product_build");
+    assert_eq!(diagnostic.stream_path.as_deref(), Some("/*FileInfoStream"));
+    assert!(
+        diagnostic.message.contains("16.4.0.12833") && diagnostic.message.contains("16.4.0.13104")
+    );
+    assert!(!doc.report.complete);
+    assert!(matches!(
+        read_bytes(&field, ParseOptions::default(), true),
+        Err(Error::IncompleteRead(_))
+    ));
+    // Majors without any sample, and builds that are not dotted numbers, stay unsupported
+    for build in ["19.0.0.13104", "27.0.0.21423", "9.4.0.13104 "] {
+        assert!(
+            matches!(
+                read_bytes(
+                    &with_build(&base, "16.4.0.13104", build),
+                    ParseOptions::default(),
+                    false
+                ),
+                Err(Error::UnsupportedFeature(_))
+            ),
+            "{build}"
+        );
+    }
+    // A build of a major without its own sample uses the neighbouring rules (12 reads
+    // like 11; the fixture of major 11 is byte-compatible with those rules)
+    let doc = read_bytes(
+        &with_build(&fixture::fixture(11), "11.7.0.5203", "12.5.0.5302"),
+        ParseOptions::default(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(doc.entities.len(), verified.entities.len());
+    let message = &doc.report.diagnostics[0].message;
+    assert!(message.contains("major 12") && message.contains("11.7.0.5203"));
+    assert!(message.contains("15.0.0.5681"));
+}
 #[test]
 fn unsupported_records_are_explicit_and_strict_error_retains_report() {
     let data = fixture::mutate_stream(&fixture::fixture(10), BLOCK, |data| {
