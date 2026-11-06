@@ -10,31 +10,31 @@ import json
 from dataclasses import dataclass
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SourceSpan:
     offset: int
     length: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TextField:
     value: str
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UnknownField:
     span: SourceSpan
     hex: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class MetadataProperty:
     key: TextField
     value: TextField
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FileInfo:
     evidence: str
     stream_version: TextField
@@ -45,7 +45,7 @@ class FileInfo:
     unknown_fields: tuple[UnknownField, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AppRecord:
     span: SourceSpan
     type_id_hex: str
@@ -56,7 +56,7 @@ class AppRecord:
     unknown_fields: tuple[UnknownField, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AppInfo:
     evidence: str
     stream_version: TextField
@@ -64,13 +64,13 @@ class AppInfo:
     records: tuple[AppRecord, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Metadata:
     file_info: FileInfo
     app_info: AppInfo
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PreviewInfo:
     evidence: str
     stream_version: TextField
@@ -85,7 +85,7 @@ class PreviewInfo:
     unknown_fields: tuple[UnknownField, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StreamPayloadBlock:
     stream_offset: int
     compressed_size: int
@@ -94,7 +94,7 @@ class StreamPayloadBlock:
     logical_size: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StreamPayloadInfo:
     encoding: str
     logical_size: int
@@ -102,13 +102,13 @@ class StreamPayloadInfo:
     blocks: tuple[StreamPayloadBlock, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DecodedStream:
     info: StreamPayloadInfo
     data: bytes
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordPropertyValue:
     tag: int
     key: TextField | None
@@ -117,14 +117,14 @@ class RecordPropertyValue:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordPropertyGroup:
     type_id: str
     span: SourceSpan
     values: tuple[RecordPropertyValue, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordRelation:
     """A bounded relation with opaque value bytes available at its source span."""
 
@@ -133,7 +133,7 @@ class RecordRelation:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordDisplayCache:
     """Nested display records, separate from ordinary top-level entities."""
 
@@ -144,7 +144,7 @@ class RecordDisplayCache:
     records: tuple[RecordHeader, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordExtension:
     span: SourceSpan
     relation_section_span: SourceSpan
@@ -159,7 +159,7 @@ class RecordExtension:
     tail_raw: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordHeader:
     type_id: str
     class_name: str | None
@@ -174,7 +174,7 @@ class RecordHeader:
     extension: RecordExtension | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RecordInspection:
     evidence: str
     offset_space: str
@@ -187,7 +187,7 @@ class RecordInspection:
     profile: str | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LineAttributes:
     span: SourceSpan
     layer_status_raw: int
@@ -203,7 +203,7 @@ class LineAttributes:
     linetype_scale: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LineRecord:
     record_index: int
     start: tuple[float, float, float]
@@ -212,13 +212,13 @@ class LineRecord:
     attributes: LineAttributes
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class UnsupportedLine:
     record_index: int
     reason: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class LineInspection:
     profile: str
     evidence: str

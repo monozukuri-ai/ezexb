@@ -18,12 +18,12 @@ from .document import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorldTransform:
     matrix: tuple[float, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EllipticCurve:
     center: tuple[float, float, float]
     axis_u: tuple[float, float, float]
@@ -38,21 +38,21 @@ class EllipticCurve:
 WorldCurve = Point | Line | Circle | Arc | EllipticCurve
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorldPolylineSegment:
     curve: WorldCurve
     start_width_stored: float
     end_width_stored: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorldPolyline:
     closed: bool
     segments: tuple[WorldPolylineSegment, ...]
     kind: Literal["Polyline"] = "Polyline"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorldInstance:
     entity_index: int
     entity_id: int
@@ -63,7 +63,7 @@ class WorldInstance:
     geometry: WorldCurve | WorldPolyline | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class WorldScene:
     space_id: int
     root_block_id: int
@@ -78,7 +78,7 @@ class WorldScene:
     diagnostics: tuple[Diagnostic, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SvgPreview:
     svg: str
     space_id: int

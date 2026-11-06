@@ -103,7 +103,7 @@ class ParseOptions:
         )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HeaderInfo:
     """Signature observation, without validating EXB or its CFB contents."""
 

@@ -12,13 +12,13 @@ if TYPE_CHECKING:
     from .partno import PartItem
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryPoint:
     point: tuple[float, float, float]
     kind: Literal["Point"] = "Point"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryCircular:
     center: tuple[float, float, float]
     radius: float
@@ -28,7 +28,7 @@ class BoundaryCircular:
     kind: Literal["Circular"] = "Circular"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryEllipse:
     center: tuple[float, float, float]
     x_axis: tuple[float, float, float]
@@ -41,7 +41,7 @@ class BoundaryEllipse:
     kind: Literal["Ellipse"] = "Ellipse"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryNurbs:
     plane: tuple[float, float, float, float]
     degree: int
@@ -52,7 +52,7 @@ class BoundaryNurbs:
     kind: Literal["Nurbs"] = "Nurbs"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryPolyline:
     vertices: tuple[BoundaryVertex, ...]
     closed: bool
@@ -60,13 +60,13 @@ class BoundaryPolyline:
     kind: Literal["Polyline"] = "Polyline"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PresentationGeometry:
     category: str
     geometry: DegenerateArc | Point | Line | Circle | Arc | Polyline | Text | Solid | PartItem
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Nurbs:
     plane: tuple[float, float, float, float]
     degree: int
@@ -82,7 +82,7 @@ class Nurbs:
     kind: Literal["Nurbs"] = "Nurbs"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Ellipse:
     center: tuple[float, float, float]
     x_axis: tuple[float, float, float]
@@ -96,21 +96,21 @@ class Ellipse:
     kind: Literal["Ellipse"] = "Ellipse"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryLoop:
     curves: tuple[BoundaryCurve, ...]
     loop_type_raw: int | None
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryCurve:
     native_type: int
     geometry: BoundaryGeometry
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BoundaryVertex:
     point: tuple[float, float]
     legacy_z: float | None
@@ -119,7 +119,7 @@ class BoundaryVertex:
     end_width: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FillBoundary:
     pick_point: tuple[float, float, float]
     loops: tuple[BoundaryLoop, ...]
@@ -127,7 +127,7 @@ class FillBoundary:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FillSettings:
     associated_raw: int
     relation_flags_raw: int
@@ -141,7 +141,7 @@ class FillSettings:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Hatch:
     boundary: FillBoundary
     pattern: HatchPattern
@@ -152,7 +152,7 @@ class Hatch:
     line_cache_points: tuple[tuple[float, float, float], ...] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HatchPattern:
     name_bytes: tuple[int, ...]
     name_ascii: str | None
@@ -163,7 +163,7 @@ class HatchPattern:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HatchPatternLine:
     parameters_stored: tuple[float, float, float, float, float, float, float]
     dash_count: int
@@ -172,19 +172,19 @@ class HatchPatternLine:
     reserved_dash_span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StoredSolid:
     boundary: FillBoundary
     gradient: SolidGradient | None
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Solid(StoredSolid):
     kind: Literal["Solid"] = "Solid"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SolidGradient:
     type_raw: int
     name: TextField
@@ -197,7 +197,7 @@ class SolidGradient:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Dimension:
     dimension_type_id: str
     value_stored: float
@@ -214,7 +214,7 @@ class Dimension:
     kind: Literal["Dimension"] = "Dimension"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Roughness:
     symbol_raw: int
     same_requirement_raw: int
@@ -229,7 +229,7 @@ class Roughness:
     kind: Literal["Roughness"] = "Roughness"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class GeometricTolerance:
     leader_points: tuple[tuple[float, float, float], ...]
     direction_raw: int
@@ -239,13 +239,13 @@ class GeometricTolerance:
     kind: Literal["GeometricTolerance"] = "GeometricTolerance"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SymbolLabel:
     location: tuple[float, float, float]
     text: TextField
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SectionMarker:
     cut_points: tuple[tuple[float, float, float], ...]
     labels: tuple[SymbolLabel, ...]
@@ -255,7 +255,7 @@ class SectionMarker:
     kind: Literal["SectionMarker"] = "SectionMarker"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Datum:
     location_reference_raw: tuple[int, int]
     location: tuple[float, float, float]
@@ -273,7 +273,7 @@ class Datum:
 SymbolData = Roughness | GeometricTolerance | SectionMarker | Datum
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Symbol:
     symbol_type_id: str
     data: SymbolData
@@ -285,7 +285,7 @@ class Symbol:
     kind: Literal["Symbol"] = "Symbol"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PresentationRecord:
     header: RecordHeader
     attributes: EntityAttributes | None

@@ -20,9 +20,12 @@ from .content import (
     _preview_info,
     _records,
 )
-from .document import Document, _document, _report
+from .document import Document, _document_chunks, _report
 from .inspection import EntryInfo, Inspection, _from_json
 from .world import SvgPreview, WorldScene, _svg, _world
+
+#: Entities per JSON chunk handed from Rust to Python by Container.document().
+_ENTITY_CHUNK = 4096
 
 
 class Container:
@@ -91,10 +94,11 @@ class Container:
         if type(strict) is not bool:
             raise TypeError("strict must be a bool")
         try:
-            return _document(self._native.document_json(strict))
+            head, chunks = self._native.document_json_chunks(strict, _ENTITY_CHUNK)
         except IncompleteReadError as error:
             error.report = _report(error.report_json)
             raise
+        return _document_chunks(head, chunks)
 
     def world(self, space_id: int, *, strict: bool = True) -> WorldScene:
         """Expand an explicitly selected space; completeness is reported by domain."""

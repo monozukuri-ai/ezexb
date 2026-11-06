@@ -1,3 +1,4 @@
+import gc
 import json
 import subprocess
 import sys
@@ -8,9 +9,22 @@ import pytest
 
 import ezexb
 from ezexb import raw
-from ezexb.document import Arc, Circle, Insert, Line, Polyline, Text
+from ezexb.document import Arc, Circle, Insert, Line, Polyline, Text, _document, _document_chunks
 
 DATA = Path(__file__).parent / "data"
+
+
+@pytest.mark.parametrize("name", ["document-18.cfb", "entities-18.cfb", "remaining-10.cfb"])
+def test_entities_in_chunks_read_as_the_whole_document(name):
+    # Container.document() takes the entities in chunks so that the document is never one
+    # string or one tree of dicts; every chunk size gives the whole-document result.
+    with raw.open(DATA / name) as container:
+        whole = _document(container._native.document_json(False))
+        for chunk in (1, 3, 4096):
+            head, chunks = container._native.document_json_chunks(False, chunk)
+            assert _document_chunks(head, chunks) == whole
+        assert container.document(strict=False) == whole
+    assert gc.isenabled()
 
 
 @pytest.mark.parametrize("major", [10, 18])

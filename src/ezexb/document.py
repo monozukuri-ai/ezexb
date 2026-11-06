@@ -6,6 +6,7 @@ are separate Rust operations; these models preserve stored data and diagnostics.
 
 from __future__ import annotations
 
+import gc
 import json
 
 try:  # orjson parses the native JSON several times faster when it is installed.
@@ -20,6 +21,7 @@ except ImportError:  # pragma: no cover - exercised only without orjson
         return json.loads(value)
 
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -32,7 +34,7 @@ from .tables import Table, _table
 from .views import View2D, _view
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Diagnostic:
     code: str
     message: str
@@ -42,7 +44,7 @@ class Diagnostic:
     type_id: str | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ReadReport:
     profile: str
     complete: bool
@@ -55,14 +57,14 @@ class ReadReport:
     diagnostics: tuple[Diagnostic, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EntitySource:
     stream_path: str
     span: SourceSpan
     payload_span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EntityAttributes:
     span: SourceSpan
     layer_status_raw: int
@@ -79,13 +81,13 @@ class EntityAttributes:
     extension_raw: int | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StyleValue:
     source: str
     value: int | float | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ResolvedStyle:
     layer_id: int
     layer_name: str | None
@@ -95,7 +97,7 @@ class ResolvedStyle:
     linetype_scale: float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DegenerateArc:
     """Stored zero-radius/zero-basis ARC; not a drawable curve."""
 
@@ -107,20 +109,20 @@ class DegenerateArc:
     kind: Literal["DegenerateArc"] = "DegenerateArc"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Point:
     point: tuple[float, float, float]
     kind: Literal["Point"] = "Point"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Line:
     start: tuple[float, float, float]
     end: tuple[float, float, float]
     kind: Literal["Line"] = "Line"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Circle:
     center: tuple[float, float, float]
     radius: float
@@ -129,7 +131,7 @@ class Circle:
     kind: Literal["Circle"] = "Circle"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Arc:
     center: tuple[float, float, float]
     radius: float
@@ -141,7 +143,7 @@ class Arc:
     kind: Literal["Arc"] = "Arc"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PolylineVertex:
     point: tuple[float, float]
     legacy_z: float | None
@@ -151,7 +153,7 @@ class PolylineVertex:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Polyline:
     vertices: tuple[PolylineVertex, ...]
     closed: bool
@@ -161,7 +163,7 @@ class Polyline:
     kind: Literal["Polyline"] = "Polyline"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StoredText:
     contents: str
     contents_span: SourceSpan
@@ -190,12 +192,12 @@ class StoredText:
     column_entries_raw: tuple[tuple[float, float], ...] | None = None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Text(StoredText):
     kind: Literal["Text"] = "Text"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Insert:
     block_id: int
     block_status: int
@@ -211,7 +213,7 @@ class Insert:
     kind: Literal["Insert"] = "Insert"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AttachedAttribute:
     record: ContextRecord
     attributes: EntityAttributes
@@ -225,7 +227,7 @@ class AttachedAttribute:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class AttributeDefinition:
     tag: TextField
     prompt: TextField
@@ -262,7 +264,7 @@ Geometry = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Entity:
     id: int
     owner_id: int
@@ -280,7 +282,7 @@ class Entity:
         return self.geometry.kind
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ContextRecord:
     class_name: str | None
     type_id: str
@@ -293,7 +295,7 @@ class ContextRecord:
     extension_span: SourceSpan | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Layer:
     id: int
     owner: int
@@ -316,7 +318,7 @@ class Layer:
     unknown_fields: tuple[SourceSpan, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Linetype:
     id: int
     owner: int
@@ -331,7 +333,7 @@ class Linetype:
     advanced_present: bool
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Space:
     id: int
     owner: int
@@ -345,7 +347,7 @@ class Space:
     unknown_fields: tuple[SourceSpan, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Block:
     solid_attachment: ContextRecord | None
     solid_geometry: StoredSolid | None
@@ -361,7 +363,7 @@ class Block:
     unknown_fields: tuple[SourceSpan, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StyleContext:
     evidence: str
     complete: bool
@@ -373,7 +375,7 @@ class StyleContext:
     budget_used: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SpaceContext:
     evidence: str
     complete: bool
@@ -384,7 +386,7 @@ class SpaceContext:
     budget_used: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TextStyle:
     id: int
     owner: int
@@ -405,21 +407,21 @@ class TextStyle:
     extra_flags_raw: tuple[int, int, int] | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TextStyleContext:
     complete: bool
     styles: tuple[TextStyle, ...]
     diagnostics: tuple[str, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class DrawingBlock:
     definition: Block
     stream_path: str
     entity_indices: tuple[int, ...]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Document:
     profile: str
     evidence: str
@@ -576,66 +578,110 @@ def _report(value: str | dict[str, Any]) -> ReadReport:
 
 
 def _document(value: str) -> Document:
+    data = _loads(value)
+    return _document_from(data, data["entities"])
+
+
+def _document_chunks(head: str, chunks: Iterable[str]) -> Document:
+    """`_document` for the native document without its entities (``head``) and its
+    entities as JSON arrays (``chunks``). Each chunk is converted before the next is
+    read, so the document never exists as one string or one tree of dicts."""
+    return _document_from(_loads(head), (item for chunk in chunks for item in _loads(chunk)))
+
+
+_ENTITY_GEOMETRY = {
+    "DegenerateArc": DegenerateArc,
+    "Point": Point,
+    "Line": Line,
+    "Circle": Circle,
+    "Arc": Arc,
+    "Polyline": Polyline,
+    "Text": Text,
+    "Insert": Insert,
+    "AttributeDefinition": AttributeDefinition,
+    "Dimension": Dimension,
+    "Hatch": Hatch,
+    "Solid": Solid,
+    "Ellipse": Ellipse,
+    "Nurbs": Nurbs,
+    "PartNumber": PartNumber,
+    "BomTable": BomTable,
+    "View2D": View2D,
+    "Table": Table,
+    "Symbol": Symbol,
+}
+
+
+def _document_from(data: dict[str, Any], entity_items: Iterable[dict[str, Any]]) -> Document:
     from .content import _property_group
 
-    data = _loads(value)
-    data["file_info"] = _file_info(json.dumps(data["file_info"]))
-    data["styles"] = _convert(StyleContext, data["styles"])
-    data["text_style_context"] = _convert(TextStyleContext, data["text_style_context"])
-    data["space_context"] = _convert(SpaceContext, data["space_context"])
-    data["report"] = _report(data["report"])
-    data["blocks"] = tuple(
-        DrawingBlock(_convert(Block, b["definition"]), b["stream_path"], tuple(b["entity_indices"]))
-        for b in data["blocks"]
+    # The conversion builds a tree of millions of new objects and no cycles. The
+    # cyclic collector found nothing in it but went over the growing tree again and
+    # again, a third of the read time of a 6 MB drawing; it runs again afterwards.
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        data["file_info"] = _file_info(json.dumps(data["file_info"]))
+        data["styles"] = _convert(StyleContext, data["styles"])
+        data["text_style_context"] = _convert(TextStyleContext, data["text_style_context"])
+        data["space_context"] = _convert(SpaceContext, data["space_context"])
+        data["report"] = _report(data["report"])
+        data["blocks"] = tuple(
+            DrawingBlock(
+                _convert(Block, b["definition"]), b["stream_path"], tuple(b["entity_indices"])
+            )
+            for b in data["blocks"]
+        )
+        strings: dict[str, str] = {}
+        data["entities"] = tuple(_entity(item, _property_group, strings) for item in entity_items)
+        data["uninterpreted_streams"] = tuple(EntryInfo(**e) for e in data["uninterpreted_streams"])
+        return Document(**data)
+    finally:
+        if collecting:
+            gc.enable()
+
+
+def _shared(strings: dict[str, str], value: Any) -> Any:
+    """One object per distinct string of a document (the JSON parser makes a new
+    object for every occurrence)."""
+    return strings.setdefault(value, value) if type(value) is str else value
+
+
+def _entity(item: dict[str, Any], property_group: Any, strings: dict[str, str]) -> Entity:
+    # Every entity repeats a few strings (type ids, stream path, layer name, style
+    # sources, geometry kind): sharing them is 90 MB less for 200,000 entities.
+    item["type_id"] = _shared(strings, item["type_id"])
+    source = item["source"]
+    source["stream_path"] = _shared(strings, source["stream_path"])
+    item["source"] = _convert(EntitySource, source)
+    item["attributes"] = _convert(EntityAttributes, item["attributes"])
+    style = item["style"]
+    style["layer_name"] = _shared(strings, style["layer_name"])
+    for key in ("linetype", "color_raw", "line_width"):
+        value = style[key]
+        value["source"] = _shared(strings, value["source"])
+        style[key] = StyleValue(**value)
+    item["style"] = ResolvedStyle(**style)
+    geometry = item["geometry"]
+    geometry["kind"] = _shared(strings, geometry["kind"])
+    for prop in item["properties"]:
+        prop["type_id"] = _shared(strings, prop["type_id"])
+    cls = _ENTITY_GEOMETRY[item["geometry"]["kind"]]
+    decoder = (
+        _partno
+        if cls is PartNumber
+        else _decode
+        if cls in (Dimension, Hatch, Solid, Ellipse, Nurbs, Symbol)
+        else _convert
     )
-    entities = []
-    classes = {
-        "DegenerateArc": DegenerateArc,
-        "Point": Point,
-        "Line": Line,
-        "Circle": Circle,
-        "Arc": Arc,
-        "Polyline": Polyline,
-        "Text": Text,
-        "Insert": Insert,
-        "AttributeDefinition": AttributeDefinition,
-        "Dimension": Dimension,
-        "Hatch": Hatch,
-        "Solid": Solid,
-        "Ellipse": Ellipse,
-        "Nurbs": Nurbs,
-        "PartNumber": PartNumber,
-        "BomTable": BomTable,
-        "View2D": View2D,
-        "Table": Table,
-        "Symbol": Symbol,
-    }
-    for item in data["entities"]:
-        item["source"] = _convert(EntitySource, item["source"])
-        item["attributes"] = _convert(EntityAttributes, item["attributes"])
-        style = item["style"]
-        for key in ("linetype", "color_raw", "line_width"):
-            style[key] = StyleValue(**style[key])
-        item["style"] = ResolvedStyle(**style)
-        cls = classes[item["geometry"]["kind"]]
-        decoder = (
-            _partno
-            if cls is PartNumber
-            else _decode
-            if cls in (Dimension, Hatch, Solid, Ellipse, Nurbs, Symbol)
-            else _convert
-        )
-        item["geometry"] = (
-            _bom(item["geometry"])
-            if cls is BomTable
-            else _view(item["geometry"])
-            if cls is View2D
-            else _table(Table, item["geometry"])
-            if cls is Table
-            else decoder(cls, item["geometry"])
-        )
-        item["properties"] = tuple(_property_group(prop) for prop in item["properties"])
-        entities.append(Entity(**item))
-    data["entities"] = tuple(entities)
-    data["uninterpreted_streams"] = tuple(EntryInfo(**e) for e in data["uninterpreted_streams"])
-    return Document(**data)
+    item["geometry"] = (
+        _bom(item["geometry"])
+        if cls is BomTable
+        else _view(item["geometry"])
+        if cls is View2D
+        else _table(Table, item["geometry"])
+        if cls is Table
+        else decoder(cls, item["geometry"])
+    )
+    item["properties"] = tuple(property_group(prop) for prop in item["properties"])
+    return Entity(**item)

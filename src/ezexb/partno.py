@@ -12,14 +12,14 @@ if TYPE_CHECKING:
     from .document import EntityAttributes
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PartNumberObjectReference:
     status_raw: int
     id_raw: int
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PartNumberReferencePoint:
     flags_raw: int
     type_raw: int
@@ -34,7 +34,7 @@ class PartNumberReferencePoint:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PartItem:
     index_raw: int
     presentation_records: tuple[PresentationRecord, ...]
@@ -42,14 +42,14 @@ class PartItem:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PartNumberItem:
     header: RecordHeader
     attributes: EntityAttributes
     geometry: PartItem
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PartNumber:
     style_reference: PartNumberObjectReference
     table_reference: PartNumberObjectReference

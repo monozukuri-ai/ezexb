@@ -13,14 +13,14 @@ if TYPE_CHECKING:
     from .document import EntityAttributes
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BomRewindPoint:
     index_raw: int
     point: tuple[float, float, float]
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BomDisplayItem:
     header: RecordHeader
     attributes: EntityAttributes
@@ -30,7 +30,7 @@ class BomDisplayItem:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class BomTable:
     table_reference: PartNumberObjectReference
     break_direction_raw: int

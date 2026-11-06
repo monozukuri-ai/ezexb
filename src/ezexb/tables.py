@@ -9,27 +9,27 @@ from .complex import PresentationRecord, _decode
 from .content import SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableObjectReference:
     status_raw: int
     id_raw: int
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableColumn:
     index: int
     width: float
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableTextContent:
     text: str
     kind: Literal["Text"] = "Text"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableBlockContent:
     auto_scale_raw: int
     reference: TableObjectReference
@@ -38,7 +38,7 @@ class TableBlockContent:
     kind: Literal["Block"] = "Block"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableContent:
     index: int
     type_raw: int
@@ -46,13 +46,13 @@ class TableContent:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TablePropertyValue:
     kind: Literal["U16", "U32", "F64"]
     value: int | float
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableProperty:
     index: int
     type_raw: int
@@ -60,7 +60,7 @@ class TableProperty:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableCell:
     index: int
     state_raw: int
@@ -73,7 +73,7 @@ class TableCell:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableRow:
     index: int
     height: float
@@ -85,14 +85,14 @@ class TableRow:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableIndexedValue:
     index: int
     value: float
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TableBreakData:
     flag_raw: int
     parameters_raw: tuple[int, int]
@@ -102,7 +102,7 @@ class TableBreakData:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HoleChartColumn:
     index: int
     property_raw: int
@@ -112,7 +112,7 @@ class HoleChartColumn:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class HoleChartData:
     coordinate_matrix_raw: tuple[float, ...]
     coordinate_status_raw: int
@@ -125,7 +125,7 @@ class HoleChartData:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Table:
     table_type: Literal["Table", "HoleChart"]
     style_reference: TableObjectReference

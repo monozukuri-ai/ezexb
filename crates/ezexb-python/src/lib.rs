@@ -117,6 +117,31 @@ struct RawContainer {
     inner: Mutex<Option<ezexb_core::Container>>,
 }
 
+/// The entities of a document as JSON arrays of up to `chunk` entities, each
+/// serialized when Python asks for it. Entities already handed over are dropped.
+#[pyclass(module = "ezexb._core")]
+struct EntityChunks {
+    entities: std::vec::IntoIter<ezexb_core::Entity>,
+    chunk: usize,
+}
+
+#[pymethods]
+impl EntityChunks {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<String>> {
+        let batch: Vec<ezexb_core::Entity> = self.entities.by_ref().take(self.chunk).collect();
+        if batch.is_empty() {
+            return Ok(None);
+        }
+        py.detach(|| serde_json::to_string(&batch))
+            .map(Some)
+            .map_err(|_| to_python_error(Error::InvalidInput("cannot serialize entities")))
+    }
+}
+
 impl RawContainer {
     fn with_container<T: Send>(
         &self,
@@ -232,6 +257,32 @@ impl RawContainer {
             serde_json::to_string(&container.document(strict)?)
                 .map_err(|_| Error::InvalidInput("cannot serialize document"))
         })
+    }
+
+    /// `document_json` in two parts: the document with an empty entity list, and
+    /// its entities in chunks. The whole document then never exists as one string
+    /// or as one tree of Python objects (a 6 MB drawing of 200,000 entities was a
+    /// 232 MB string and took 1.5 GB as Python objects while it was converted).
+    fn document_json_chunks(
+        &self,
+        py: Python<'_>,
+        strict: bool,
+        chunk: usize,
+    ) -> PyResult<(String, EntityChunks)> {
+        let (head, entities) = self.with_container(py, |container| {
+            let mut document = container.document(strict)?;
+            let entities = std::mem::take(&mut document.entities);
+            let head = serde_json::to_string(&document)
+                .map_err(|_| Error::InvalidInput("cannot serialize document"))?;
+            Ok((head, entities))
+        })?;
+        Ok((
+            head,
+            EntityChunks {
+                entities: entities.into_iter(),
+                chunk: chunk.max(1),
+            },
+        ))
     }
 
     fn world_json(&self, py: Python<'_>, space_id: i32, strict: bool) -> PyResult<String> {

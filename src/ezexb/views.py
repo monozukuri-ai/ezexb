@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .document import Insert
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class ViewClip:
     reference_bytes: tuple[int, ...]
     reference_span: SourceSpan
@@ -22,7 +22,7 @@ class ViewClip:
     span: SourceSpan
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class View2D:
     block_reference: Insert
     name: TextField

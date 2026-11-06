@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class EntryInfo:
     path: str
     kind: Literal["storage", "stream"]
     size_bytes: int | None
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Inspection:
     signature: str
     classification: Literal["unknown", "legacy_caxa_candidate", "cfb", "cfb_exb_candidate"]
