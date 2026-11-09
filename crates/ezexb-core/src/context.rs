@@ -163,10 +163,10 @@ impl From<Error> for ContextError {
 }
 type ContextResult<T> = Result<T, ContextError>;
 
-/// Major of a build inside the qualified range (see `crate::build`); the
-/// decoders branch on the major only.
+/// Major whose rules decode a build inside the qualified range (see
+/// `crate::build::rules_major`); the decoders branch on the major only.
 fn major(build: &str) -> Option<u32> {
-    crate::build::qualified_major(build)
+    crate::build::rules_major(build)
 }
 
 fn guid(r: &mut Reader<'_>) -> Result<String, Error> {

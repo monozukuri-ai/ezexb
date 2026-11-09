@@ -111,6 +111,6 @@ def test_unverified_build_of_a_qualified_major_reads_with_a_diagnostic(tmp_path)
     with pytest.raises(ezexb.IncompleteReadError):
         ezexb.read(path)
     unsupported = tmp_path / "newer.cfb"
-    unsupported.write_bytes(data.replace(needle, "19.0.0.18159".encode("utf-16-le")))
+    unsupported.write_bytes(data.replace(needle, "20.0.0.18159".encode("utf-16-le")))
     with pytest.raises(ezexb.UnsupportedFeatureError):
         ezexb.read(unsupported, strict=False)

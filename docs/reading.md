@@ -8,12 +8,14 @@ and `Container::document(strict)`. No CAXA installation is required.
 The stored-entity layouts were verified against native samples of these product
 builds: `10.0.0.0000`, `11.7.0.5203`, `15.0.0.5681`, `16.4.0.13104`, and
 `18.0.0.18159`. The decoders branch on the major number, so any other build whose
-major is between 10 and 18 (field files carry builds such as `12.5.0.5302`,
-`16.0.0.6227`, `17.1.0.15581` or `18.0.0.17670`) is read with the rules of its
-major and reports one `unverified_product_build` diagnostic naming the verified
-neighbours; strict reads therefore raise `IncompleteReadError` for them. These
-strings are not an official EXB version specification. Builds outside that major
-range, or without a dotted numeric form, raise `UnsupportedFeatureError`.
+major is between 10 and 19 (field files carry builds such as `12.5.0.5302`,
+`16.0.0.6227`, `17.1.0.15581`, `18.0.0.17670` or `19.0.0.20385`) is read with the
+rules of its major (19 with those of 18, its nearest sample) and reports one
+`unverified_product_build` diagnostic naming the verified neighbours; strict
+reads therefore raise `IncompleteReadError` for them. A platform note CAXA
+appends after the build (`15.2.0.5869 (x64)`) is ignored. These strings are not
+an official EXB version specification. Builds outside that major range, or
+without a leading dotted numeric form, raise `UnsupportedFeatureError`.
 `ezexb.capabilities()` lists both the verified builds and the qualified major range.
 
 ```python

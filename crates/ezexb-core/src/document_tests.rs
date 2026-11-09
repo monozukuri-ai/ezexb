@@ -87,7 +87,7 @@ fn unverified_builds_of_a_qualified_major_read_with_a_diagnostic() {
         Err(Error::IncompleteRead(_))
     ));
     // Majors without any sample, and builds that are not dotted numbers, stay unsupported
-    for build in ["19.0.0.13104", "27.0.0.21423", "9.4.0.13104 "] {
+    for build in ["20.0.0.13104", "27.0.0.21423", "9.4.0.13104 "] {
         assert!(
             matches!(
                 read_bytes(
@@ -112,6 +112,24 @@ fn unverified_builds_of_a_qualified_major_read_with_a_diagnostic() {
     let message = &doc.report.diagnostics[0].message;
     assert!(message.contains("major 12") && message.contains("11.7.0.5203"));
     assert!(message.contains("15.0.0.5681"));
+    // Major 19 reads with the rules of 18 (its nearest sample); a platform note
+    // after the build does not change the major (same length as the needle)
+    let newer = fixture::fixture(18);
+    let verified = read_bytes(&newer, ParseOptions::default(), true).unwrap();
+    for build in ["19.0.0.20385", "18.0.0 (x64)"] {
+        let doc = read_bytes(
+            &with_build(&newer, "18.0.0.18159", build),
+            ParseOptions::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(doc.entities.len(), verified.entities.len(), "{build}");
+        let message = &doc.report.diagnostics[0].message;
+        assert!(
+            message.contains(build) && message.contains("18.0.0.18159"),
+            "{message}"
+        );
+    }
 }
 #[test]
 fn unsupported_records_are_explicit_and_strict_error_retains_report() {

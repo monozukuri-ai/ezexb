@@ -73,6 +73,6 @@ def test_capabilities_are_fresh_and_honest():
     assert capabilities["stream_reading"]
     assert capabilities["supported_profiles"] == ["exb-stored-planar-v1"]
     assert capabilities["supported_product_builds"][0] == "10.0.0.0000"
-    assert capabilities["qualified_product_majors"] == [10, 18]
+    assert capabilities["qualified_product_majors"] == [10, 19]
     capabilities["supported_profiles"].append("not real")
     assert ezexb.capabilities()["supported_profiles"] == ["exb-stored-planar-v1"]

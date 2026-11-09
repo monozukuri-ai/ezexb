@@ -140,8 +140,9 @@ def capabilities() -> dict[str, object]:
             "18.0.0.18159",
         ],
         # Other builds of these majors are read with the same rules plus an
-        # ``unverified_product_build`` diagnostic.
-        "qualified_product_majors": [10, 18],
+        # ``unverified_product_build`` diagnostic. A platform note after the
+        # build (``15.2.0.5869 (x64)``) is ignored.
+        "qualified_product_majors": [10, 19],
         "world_coordinate_flattening": True,
         "portable_svg_preview": True,
         "text_style_reading": True,

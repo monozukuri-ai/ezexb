@@ -62,10 +62,10 @@ pub enum RecordProfile {
 
 impl RecordProfile {
     /// Profile for a product build inside the qualified major range
-    /// (`crate::build::qualified_major`); builds of major 18 carry 37-byte
-    /// attributes, earlier majors 33 bytes.
+    /// (`crate::build::rules_major`); builds of major 18 and later carry
+    /// 37-byte attributes, earlier majors 33 bytes.
     pub fn from_product_build(build: &str) -> Option<Self> {
-        crate::build::qualified_major(build).map(Self::for_major)
+        crate::build::rules_major(build).map(Self::for_major)
     }
 
     pub fn for_major(major: u32) -> Self {
@@ -1242,7 +1242,15 @@ mod tests {
             RecordProfile::from_product_build("18.0.0.17670"),
             Some(RecordProfile::Schema3Attributes37)
         );
-        for build in ["10", "18.0.0.18159 ", "Synthetic Build", "27.0.0.21423"] {
+        assert_eq!(
+            RecordProfile::from_product_build("19.0.0.20385"),
+            Some(RecordProfile::Schema3Attributes37)
+        );
+        assert_eq!(
+            RecordProfile::from_product_build("15.2.0.5869 (x64)"),
+            profile33()
+        );
+        for build in ["10", "20.0.0.1", "Synthetic Build", "27.0.0.21423"] {
             assert_eq!(RecordProfile::from_product_build(build), None);
         }
         let mut data = header();

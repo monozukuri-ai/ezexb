@@ -304,7 +304,8 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
     let file_info = decode_file_info(&file_data, budget.remaining())?;
     budget.charge(file_info.properties.len() as u64)?;
     let build = file_info.product_build.value.clone();
-    let Some(major) = qualified_major(&build) else {
+    // The major whose rules decode this build (19 reads with those of 18)
+    let Some(major) = rules_major(&build) else {
         return Err(Error::UnsupportedFeature(
             "stored-entity reader for this product build",
         ));
