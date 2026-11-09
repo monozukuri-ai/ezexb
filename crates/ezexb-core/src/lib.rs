@@ -11,6 +11,7 @@ mod container;
 mod context;
 mod document;
 mod geometry;
+mod legacy;
 mod lines;
 mod metadata;
 mod partno;
@@ -27,6 +28,8 @@ mod container_tests;
 #[cfg(test)]
 mod document_tests;
 mod error;
+#[cfg(test)]
+mod legacy_tests;
 mod probe;
 #[cfg(test)]
 #[path = "../examples/support/remaining_fixture.rs"]
@@ -48,6 +51,7 @@ pub use container::{inspect_bytes, inspect_file, Container, EntryInfo, EntryKind
 pub use context::*;
 pub use document::*;
 pub use geometry::{EntityAttributes, PrimitiveEntity, PrimitiveGeometry};
+pub use legacy::{read_legacy_bytes, read_legacy_file, LEGACY_CONTAINER_VERSIONS, LEGACY_PROFILE};
 pub use lines::{
     inspect_lines, inspect_lines_with_profile, LineAttributes, LineInspection, LineRecord,
     UnsupportedLine,

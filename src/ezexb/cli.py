@@ -18,6 +18,7 @@ from . import (
     inspect,
     probe,
     raw,
+    read,
 )
 
 
@@ -60,7 +61,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     _add_input(records)
     records.add_argument("stream_path")
-    reader = commands.add_parser("read", help="read the limited stored-entity profile")
+    reader = commands.add_parser(
+        "read", help="read the limited stored-entity profile or a legacy file"
+    )
     _add_input(reader)
     reader.add_argument(
         "--partial",
@@ -126,11 +129,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = asdict(probe(args.path, options=options))
         elif args.command == "inspect":
             result = asdict(inspect(args.path, options=options))
+        elif args.command == "read":
+            # Also reads the legacy container, which has no directory to open.
+            result = asdict(read(args.path, strict=not args.partial, options=options))
         else:
             with raw.open(args.path, options=options) as container:
-                if args.command == "read":
-                    result = asdict(container.document(strict=not args.partial))
-                elif args.command == "world":
+                if args.command == "world":
                     result = asdict(container.world(args.space, strict=not args.partial))
                 elif args.command == "svg":
                     result = asdict(container.svg(args.space, strict=not args.partial))

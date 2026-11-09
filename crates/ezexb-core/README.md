@@ -25,6 +25,11 @@ The final argument selects strictness. Strict reads return
 return the supported subset with diagnostics; input and resource errors still
 fail. `read_bytes` and `Container::document` expose the same reader.
 
+`read_file` and `read_bytes` also read drawings saved before the compound-document
+format (signature `CaxaEbForWindows`); `read_legacy_file` and `read_legacy_bytes`
+read them directly. Such a document has the profile `exb-legacy-planar-v1`: one
+model space of lines, circles, arcs, polylines, points and text.
+
 Supported data includes POINT, LINE, CIRCLE, ARC, POLYLINE, TEXT, INSERT attributes,
 attribute definitions, HATCH/SOLID boundaries, stored NURBS/ELLIPSE parameters,
 partial dimension/symbol data, part-number callouts, stored tables/BOM presentations,

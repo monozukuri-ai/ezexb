@@ -52,6 +52,12 @@ are not inferred. Use `read_world()` to expand a selected space. A complete repo
 means completeness within the [supported reader profile](https://github.com/monozukuri-ai/ezexb/blob/main/docs/reading.md), not
 full EXB compatibility or CAXA display equivalence.
 
+Files written before the compound-document format start with the signature
+`CaxaEbForWindows`. `read()` and `read_bytes()` recognise it and return the same
+`Document` type under the
+[legacy profile](https://github.com/monozukuri-ai/ezexb/blob/main/docs/reading.md#legacy-caxaebforwindows-files):
+one model space of lines, circles, arcs, polylines, points and text.
+
 ## Command line
 
 ```sh
@@ -85,6 +91,7 @@ JSON report in automation. Extraction commands refuse to overwrite existing file
 | Symbols and callouts | Selected roughness, geometric-tolerance, section and datum fields; part-number records and nested item presentations |
 | Tables and views | Stored general/hole-chart cells and layout, BOM header/row presentations, 2D view references and circular clips |
 | Context | Layers, linetypes, text styles, spaces and blocks |
+| Legacy files | `CaxaEbForWindows` container versions 1050, 1060 and 1070: POINT, LINE, CIRCLE, ARC, POLYLINE and TEXT in one model space, with layers, palette colors, line styles and text styles |
 | Inspection | CFB streams, metadata, embedded BMP, decoded payloads and record headers |
 
 Support depends on the exact layout and build profile. Dimension/symbol construction,

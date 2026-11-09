@@ -17,6 +17,9 @@ sha2 = "0.10"
 uuid = ">=1, <1.21"
 serde = { version = "1", features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Legacy CaxaEbForWindows files store GBK strings. encoding_rs 0.8.40 and later
+# need Rust 1.88; keep it compatible with Rust 1.83.
+encoding_rs = ">=0.8.31, <0.8.40"
 
 [dev-dependencies]
 serde_json = "1"

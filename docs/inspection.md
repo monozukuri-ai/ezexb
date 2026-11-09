@@ -13,7 +13,7 @@ return an immutable `Inspection` containing:
 | Classification | Meaning |
 | --- | --- |
 | `unknown` | No recognized header; no container traversal |
-| `legacy_caxa_candidate` | Legacy header only; stream access is unsupported |
+| `legacy_caxa_candidate` | Legacy `CaxaEbForWindows` header. The file is one byte stream without a directory, so there is nothing to inspect; `read()` returns its entities |
 | `cfb` | Parsed CFB directory without the required EXB marker layout |
 | `cfb_exb_candidate` | Parsed CFB directory containing the expected marker kinds |
 

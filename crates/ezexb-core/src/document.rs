@@ -126,14 +126,25 @@ impl Document {
             .map(|space| self.entities_in_block(space.block_id))
     }
 }
+/// Read a drawing file. Compound-document EXB files use the stored-entity
+/// profile; files with the legacy `CaxaEbForWindows` signature are read by
+/// [`crate::read_legacy_file`].
 pub fn read_file(
     path: impl AsRef<Path>,
     options: ParseOptions,
     strict: bool,
 ) -> Result<Document, Error> {
+    let path = path.as_ref();
+    if crate::probe_file(path, options)?.signature == crate::Signature::LegacyCaxaCandidate {
+        return crate::read_legacy_file(path, options, strict);
+    }
     Container::open(path, options)?.document(strict)
 }
+/// Read drawing bytes; see [`read_file`] for the two supported containers.
 pub fn read_bytes(data: &[u8], options: ParseOptions, strict: bool) -> Result<Document, Error> {
+    if data.starts_with(crate::legacy::LEGACY_MAGIC) {
+        return crate::read_legacy_bytes(data, options, strict);
+    }
     Container::from_bytes(data, options)?.document(strict)
 }
 struct Budget {

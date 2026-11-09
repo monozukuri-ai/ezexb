@@ -129,6 +129,87 @@ fields retain spans. Other streams, including drawing settings, dictionary,
 block-manager metadata and previews, are listed in `uninterpreted_streams`.
 The profile does not interpret their application-specific semantics.
 
+## Legacy CaxaEbForWindows files
+
+Drawings saved before the compound-document format are one byte stream that
+starts with the counted string `CaxaEbForWindows`. `read()`, `read_bytes()` and
+the Rust `read_file` / `read_bytes` recognise the signature and return a
+`Document` whose `profile` is `exb-legacy-planar-v1`
+(`capabilities()["legacy_profile"]`); `read_legacy_file` and `read_legacy_bytes`
+read it directly. The `ezexb read` command accepts these files; the container,
+stream, metadata, preview, world and SVG functions apply to compound documents
+only.
+
+The layouts of the container versions 1050, 1060 and 1070 were checked against
+field files. Another version between 1000 and 1099 is read with the nearest of
+those layouts and reports `unverified_legacy_version`; any other value raises
+`UnsupportedFeatureError`. The version is in `file_info.stream_version` and
+`file_info.product_build` is `CaxaEbForWindows <version>`.
+
+A legacy document has one space and one block (`*Model_Space`) that holds every
+entity. Blocks, dimensions, tables and hatches store their members as ordinary
+records in drawing coordinates, so the reader returns them flattened: the
+members are plain entities whose `owner_id` is the id of their group record,
+and a block reference is not expanded because its geometry is already there.
+
+| Record | Returned as | Notes |
+| --- | --- | --- |
+| Point, line | `Point`, `Line` | `type_id` `legacy:point`, `legacy:line` |
+| Circle, arc | `Circle`, `Arc` | Centre, unit axes, radius; an arc with a negative sweep is returned with a mirrored second axis and a positive sweep |
+| Polyline | `Polyline` | Straight segments |
+| Ellipse, spline | `Polyline` (`legacy:ellipse_samples`, `legacy:spline_samples`) | The stored sample points; the curve definition is skipped (`legacy_curve_approximated`) |
+| Text | `Text` | See below |
+| Block, dimension, table, annotation and hatch groups | Their members | Dimension values, table data and hatch parameters are not returned |
+
+Styles use the vocabulary of the compound-document profile, so both profiles can
+be consumed alike:
+
+- **Colors.** A record stores one byte: an index into the 48 basic colors of the
+  Windows color dialog, then the sixteen custom colors the file stores. The
+  reader returns the color value (`0x00BBGGRR`) in `Layer.color_raw` and in
+  `style.color_raw`.
+- **Line styles.** One byte selects a dash pattern and a width together. The
+  program defines the first 24 styles itself and the file stores the others
+  (name, a 16-bit pattern and a width). `style.linetype` holds the index, and
+  `Document.linetypes` has an entry for the five standard styles (0 thick, 1
+  thin, 2 dashed, 3 centre, 4 phantom, named `LEGACY_*`), for every stored
+  style (ids from 24, with `pattern` and one dash unit per pattern bit) and a
+  continuous placeholder `LEGACY_STYLE_<n>` for any other index in use
+  (`legacy_line_style_unidentified`). The file stores no dash lengths for the
+  standard styles; theirs are conventional values in millimetres. The width is
+  the `wide` preset for style 0, `thin` for styles 1 to 4 and the stored width
+  for a stored style.
+- **ByLayer and ByBlock.** ByLayer values come from the layer table. A ByBlock
+  value is taken from the group the entity was flattened out of and is returned
+  with the source `by_block` and that value; outside a group it has no value.
+
+Text maps onto the fields of the compound-document text record: `alignment_raw`
+is the 3×3 code (0 top-left … 8 bottom-right; the file stores one more),
+`mode_flags_raw`, `fit_mode` and `writing_direction` use the same bits,
+`rotation` is in radians, and `insertion` is the alignment point (the point
+inside the stored area when the text has one, `area_width_stored` and
+`area_height_stored`). `style_id_raw` refers to `Document.text_styles`: the
+text-style table of the 1060 and 1070 layouts (ids from 10000), or, in the
+1050 layout, one style per distinct combination of the font names and factors
+that each text record carries (ids from 1). The two width factors of a style are
+taken in the order of the two font names.
+
+| Diagnostic | Meaning |
+| --- | --- |
+| `legacy_record_tail_skipped` | Fields behind the members of dimension, table and annotation groups, behind curve points or behind 1050 text are not decoded; the geometry before them is returned |
+| `legacy_curve_approximated` | Ellipses or splines are returned as their stored sample polylines |
+| `legacy_records_skipped` | Bytes that are not a readable record were skipped up to the next record header |
+| `legacy_trailing_data_skipped` | Data behind the last entity record (for example table rows) is not decoded |
+| `legacy_line_style_unidentified` | A built-in line style other than the five standard ones is in use and is returned as a continuous line without a width |
+| `unresolved_layer` | Entities reference a layer index outside the layer table |
+| `legacy_color_unresolved` | A color byte lies outside the palette |
+| `legacy_text_alignment_unknown` | A text stores an alignment code outside 1 to 9 and is aligned at the top-left corner |
+| `legacy_layer_table_missing`, `legacy_style_tables_missing`, `legacy_entity_section_missing` | A table or the entity section was not found |
+| `unverified_legacy_version` | The container version is not one of the checked ones |
+
+Drawing settings, dimension styles and the paper are not read, and a legacy
+document has no drawing scale: `Space.scale` is 1.
+
 ## Diagnostics and limits
 
 Strict mode raises `IncompleteReadError` with a typed `.report` and the original

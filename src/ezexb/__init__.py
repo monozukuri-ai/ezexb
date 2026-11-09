@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -20,7 +21,7 @@ from ._core import (
     __version__,
 )
 from .content import AppInfo, FileInfo, Metadata, PreviewInfo
-from .document import Document
+from .document import Document, _document, _report
 from .inspection import EntryInfo, Inspection, _from_json
 from .world import SvgPreview, WorldScene
 
@@ -30,6 +31,8 @@ __all__ = [
     "HeaderInfo",
     "InputLimitError",
     "IncompleteReadError",
+    "LEGACY_PROFILE",
+    "LEGACY_SIGNATURE",
     "Document",
     "WorldScene",
     "SvgPreview",
@@ -60,6 +63,12 @@ __all__ = [
     "Metadata",
     "PreviewInfo",
 ]
+
+
+#: Profile name of documents read from the legacy ``CaxaEbForWindows`` container.
+LEGACY_PROFILE = "exb-legacy-planar-v1"
+#: The counted signature string that opens a legacy file.
+LEGACY_SIGNATURE = b"\x10CaxaEbForWindows"
 
 
 @dataclass(frozen=True)
@@ -148,6 +157,10 @@ def capabilities() -> dict[str, object]:
         "text_style_reading": True,
         "native_display_equivalence": False,
         "text_rendering": False,
+        # Files written before the compound-document format (CaxaEbForWindows
+        # signature): one flat model space; splines as their sample polylines.
+        "legacy_profile": LEGACY_PROFILE,
+        "legacy_container_versions": [1050, 1060, 1070],
     }
 
 
@@ -183,12 +196,41 @@ def probe_bytes(data: bytes, *, options: ParseOptions | None = None) -> HeaderIn
     return HeaderInfo(signature, size)
 
 
+def _legacy_document(
+    native: Callable[..., str], source: str | bytes, limits: ParseOptions, strict: bool
+) -> Document:
+    if type(strict) is not bool:
+        raise TypeError("strict must be a bool")
+    try:
+        return _document(native(source, limits._limits(), strict))
+    except IncompleteReadError as error:
+        error.report = _report(error.report_json)
+        raise
+
+
+def _is_legacy_file(filename: str, limits: ParseOptions) -> bool:
+    try:
+        return _core.probe_file(filename, limits.max_file_bytes)[0] == "legacy_caxa_candidate"
+    except (OSError, ExbError):
+        # Let the compound-document path report unreadable or oversized input.
+        return False
+
+
 def read(
     path: str | os.PathLike[str], *, strict: bool = True, options: ParseOptions | None = None
 ) -> Document:
-    """Read the stored-entity profile; strict=False retains explicit partial results."""
+    """Read the stored-entity profile; strict=False retains explicit partial results.
+
+    A file with the legacy ``CaxaEbForWindows`` signature (CAXA releases before the
+    compound-document format) is read with the legacy profile instead; its
+    ``Document.profile`` is ``capabilities()["legacy_profile"]``.
+    """
     from . import raw
 
+    filename = os.fspath(path)
+    limits = options or ParseOptions()
+    if isinstance(filename, str) and _is_legacy_file(filename, limits):
+        return _legacy_document(_core.read_legacy_file_json, filename, limits, strict)
     with raw.open(path, options=options) as container:
         return container.document(strict=strict)
 
@@ -229,6 +271,9 @@ def read_bytes(
     """Read bytes under the same profile and strictness contract as read()."""
     from . import raw
 
+    if isinstance(data, bytes) and data.startswith(LEGACY_SIGNATURE):
+        limits = options or ParseOptions()
+        return _legacy_document(_core.read_legacy_bytes_json, data, limits, strict)
     with raw.open_bytes(data, options=options) as container:
         return container.document(strict=strict)
 

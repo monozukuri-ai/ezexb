@@ -112,6 +112,40 @@ fn inspect_bytes_json(py: Python<'_>, data: &[u8], limits: Limits) -> PyResult<S
         .map_err(to_python_error)
 }
 
+fn document_json(document: &ezexb_core::Document) -> Result<String, Error> {
+    serde_json::to_string(document).map_err(|_| Error::InvalidInput("cannot serialize document"))
+}
+
+/// A legacy `CaxaEbForWindows` file as document JSON (see `ezexb_core::read_legacy_file`).
+#[pyfunction]
+fn read_legacy_file_json(
+    py: Python<'_>,
+    path: PathBuf,
+    limits: Limits,
+    strict: bool,
+) -> PyResult<String> {
+    py.detach(move || {
+        ezexb_core::read_legacy_file(path, options(limits), strict)
+            .and_then(|document| document_json(&document))
+    })
+    .map_err(to_python_error)
+}
+
+/// Legacy `CaxaEbForWindows` bytes as document JSON.
+#[pyfunction]
+fn read_legacy_bytes_json(
+    py: Python<'_>,
+    data: &[u8],
+    limits: Limits,
+    strict: bool,
+) -> PyResult<String> {
+    py.detach(|| {
+        ezexb_core::read_legacy_bytes(data, options(limits), strict)
+            .and_then(|document| document_json(&document))
+    })
+    .map_err(to_python_error)
+}
+
 #[pyclass(name = "Container", module = "ezexb._core", frozen)]
 struct RawContainer {
     inner: Mutex<Option<ezexb_core::Container>>,
@@ -353,6 +387,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(require_entity_reader, module)?)?;
     module.add_function(wrap_pyfunction!(inspect_file_json, module)?)?;
     module.add_function(wrap_pyfunction!(inspect_bytes_json, module)?)?;
+    module.add_function(wrap_pyfunction!(read_legacy_file_json, module)?)?;
+    module.add_function(wrap_pyfunction!(read_legacy_bytes_json, module)?)?;
     module.add_class::<RawContainer>()?;
     Ok(())
 }
