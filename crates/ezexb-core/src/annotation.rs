@@ -58,7 +58,8 @@ pub struct PolylineGeometry {
     pub vertices: Vec<PolylineVertex>,
     pub closed: bool,
     pub closed_raw: u32,
-    /// Absent in legacy saves; otherwise restricted to the observed [0, 0, 1].
+    /// Absent in legacy saves; otherwise the observed [0, 0, 1], or the zero
+    /// vector some records store (no plane; the vertices are XY as stored).
     pub normal: Option<[f64; 3]>,
     pub span: SourceSpan,
 }
@@ -207,7 +208,9 @@ fn decode_polyline(
     } else {
         None
     };
-    if normal.is_some_and(|v| v != [0.0, 0.0, 1.0]) {
+    // Some records store the zero vector instead of a normal. It names no plane:
+    // their vertices join the neighbouring entities as stored, in the XY plane.
+    if normal.is_some_and(|v| v != [0.0, 0.0, 1.0] && v != [0.0; 3]) {
         return Err("Nondefault POLYLINE normal requires an unqualified plane transform.".into());
     }
     Ok(PolylineGeometry {

@@ -30,10 +30,12 @@ format (signature `CaxaEbForWindows`); `read_legacy_file` and `read_legacy_bytes
 read them directly. Such a document has the profile `exb-legacy-planar-v1`: one
 model space of lines, circles, arcs, polylines, points and text.
 
-Supported data includes POINT, LINE, CIRCLE, ARC, POLYLINE, TEXT, INSERT attributes,
-attribute definitions, HATCH/SOLID boundaries, stored NURBS/ELLIPSE parameters,
-partial dimension/symbol data, part-number callouts, stored tables/BOM presentations,
-2D view references and layer/style/space/block context. Qualified degenerate ARC storage
+Supported data includes POINT, LINE, construction lines, CIRCLE, ARC, POLYLINE, TEXT,
+INSERT attributes, attribute definitions, HATCH/SOLID boundaries, stored NURBS/ELLIPSE
+parameters, partial dimension/symbol data, part-number callouts, stored tables/BOM
+presentations, 2D view references and layer/style/space/block context. A record whose
+own fields are not decoded is returned through the display records cached with it
+(`Geometry::CachedDisplay`) when it carries any. Qualified degenerate ARC storage
 is retained with diagnostics. Table regeneration and view clipping are not evaluated. Coordinates remain
 in the stored block coordinate system, and physical units are not inferred.
 Exact supported builds and limitations are documented in the

@@ -1363,6 +1363,7 @@ impl<'a> Parser<'a> {
                     radius,
                     x_axis,
                     y_axis,
+                    stored_axes: None,
                 }),
             );
             return Ok(());
@@ -1395,6 +1396,7 @@ impl<'a> Parser<'a> {
                 sweep_angle: sweep,
                 start,
                 end,
+                stored_axes: None,
             }),
         );
         Ok(())

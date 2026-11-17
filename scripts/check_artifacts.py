@@ -204,6 +204,11 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
                 "crates/ezexb-core/examples/support/table_fixture.rs",
                 "crates/ezexb-core/examples/support/view2d_fixture.rs",
                 "crates/ezexb-core/examples/world.rs",
+                "tests/python/test_display.py",
+                "tests/python/data/display-16.cfb",
+                "tests/python/data/display-18.cfb",
+                "crates/ezexb-core/examples/make_display_fixture.rs",
+                "crates/ezexb-core/examples/support/display_fixture.rs",
             ]
         for name in names:
             parts = PurePosixPath(name).parts
@@ -230,6 +235,8 @@ def check(directory: Path, *, release: bool = False, tag: str | None = None) -> 
                 "tests/python/data/entities-18.cfb",
                 "tests/python/data/remaining-10.cfb",
                 "tests/python/data/remaining-18.cfb",
+                "tests/python/data/display-16.cfb",
+                "tests/python/data/display-18.cfb",
             }:
                 raise ValueError(f"unexpected CFB asset in {path}: {name}")
         if not any(PurePosixPath(n).name == "LICENSE" for n in names):

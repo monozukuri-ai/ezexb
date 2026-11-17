@@ -8,7 +8,18 @@ from typing import TYPE_CHECKING, Literal
 from .content import RecordHeader, SourceSpan, TextField, _record_header
 
 if TYPE_CHECKING:
-    from .document import Arc, Circle, DegenerateArc, EntityAttributes, Line, Point, Polyline, Text
+    from .document import (
+        Arc,
+        Circle,
+        DegenerateArc,
+        EntityAttributes,
+        Insert,
+        Line,
+        Point,
+        Polyline,
+        Text,
+        Xline,
+    )
     from .partno import PartItem
 
 
@@ -62,8 +73,24 @@ class BoundaryPolyline:
 
 @dataclass(frozen=True, slots=True)
 class PresentationGeometry:
+    #: ``Primitive``, ``Annotation``, ``Solid``, ``PartItem``, ``Insert`` (a cached block
+    #: reference; its stored matrix is not applied) or ``CachedDisplay`` (a cached record
+    #: of another class, kept through its own cached display records).
     category: str
-    geometry: DegenerateArc | Point | Line | Circle | Arc | Polyline | Text | Solid | PartItem
+    geometry: (
+        DegenerateArc
+        | Point
+        | Line
+        | Xline
+        | Circle
+        | Arc
+        | Polyline
+        | Text
+        | StoredSolid
+        | PartItem
+        | Insert
+        | CachedDisplay
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,11 +102,14 @@ class Nurbs:
     control_points: tuple[tuple[float, float, float, float], ...]
     knots: tuple[float, ...]
     span: SourceSpan
-    # Save major >= 15 only: the stored fit-point count (always -1, none) and fit
-    # tolerance that precede the curve; None on builds 10 and 11.
+    # Save major >= 15 only: the word that ends the stored fit-point list (-1) and the
+    # fit tolerance that precede the curve; None on builds 10 and 11.
     fit_point_count_raw: int | None = None
     fit_tolerance: float | None = None
     kind: Literal["Nurbs"] = "Nurbs"
+    #: Save major >= 15 only: the stored fit points in their stored order (most records
+    #: store none). The curve is the control points and knots either way.
+    fit_points: tuple[tuple[float, float, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +316,24 @@ class Symbol:
 
 
 @dataclass(frozen=True, slots=True)
+class CachedDisplay:
+    """The display records CAXA cached with a record whose own fields are not decoded.
+
+    ``source`` is ``"body"`` (the counted record list that opens the body, the layout
+    dimensions, engineering symbols, part numbers and tables share) or
+    ``"display_cache"`` (the cache behind a schema-3 body). The entity's values,
+    references and regeneration stay in ``unresolved_semantics_span``.
+    """
+
+    source: str
+    presentation_records: tuple[PresentationRecord, ...]
+    presentation_span: SourceSpan
+    unresolved_semantics_span: SourceSpan
+    span: SourceSpan
+    kind: Literal["CachedDisplay"] = "CachedDisplay"
+
+
+@dataclass(frozen=True, slots=True)
 class PresentationRecord:
     header: RecordHeader
     attributes: EntityAttributes | None
@@ -305,10 +353,12 @@ def _decode(cls, value):
         Circle,
         DegenerateArc,
         EntityAttributes,
+        Insert,
         Line,
         Point,
         Polyline,
         Text,
+        Xline,
         _convert,
     )
 
@@ -344,6 +394,7 @@ def _decode(cls, value):
         "knots",
         "control_points",
         "leader_points",
+        "fit_points",
         "cut_points",
         "start_arrow_point",
         "end_arrow_point",
@@ -429,12 +480,17 @@ def _decode(cls, value):
                 from .partno import PartItem, _partno
 
                 geometry = _partno(PartItem, nested)
+            elif g["category"] == "Insert":
+                geometry = _convert(Insert, nested)
+            elif g["category"] == "CachedDisplay":
+                geometry = _decode(CachedDisplay, nested)
             else:
                 geometry = _convert(
                     {
                         "DegenerateArc": DegenerateArc,
                         "Point": Point,
                         "Line": Line,
+                        "Xline": Xline,
                         "Circle": Circle,
                         "Arc": Arc,
                         "Polyline": Polyline,

@@ -152,6 +152,9 @@ def capabilities() -> dict[str, object]:
         # ``unverified_product_build`` diagnostic. A platform note after the
         # build (``15.2.0.5869 (x64)``) is ignored.
         "qualified_product_majors": [10, 19],
+        # A record whose own fields are not decoded is returned through the display
+        # records cached with it (geometry kind ``CachedDisplay``) when it has any.
+        "cached_display_records": True,
         "world_coordinate_flattening": True,
         "portable_svg_preview": True,
         "text_style_reading": True,

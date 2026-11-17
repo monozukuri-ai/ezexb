@@ -907,11 +907,29 @@ pub fn decode_insert(
     product_build: &str,
     options: ParseOptions,
 ) -> Option<Result<InsertEntity, InsertError>> {
-    if header.type_id != "d38b4eba-a81f-4b28-aa19-71a60d884004" {
+    if header.type_id != INSERT {
+        return None;
+    }
+    let Some(major) = major(product_build) else {
+        return Some(Err("Unqualified INSERT product build".into()));
+    };
+    decode_insert_for_major(data, header, profile, major, options)
+}
+
+pub(crate) const INSERT: &str = "d38b4eba-a81f-4b28-aa19-71a60d884004";
+
+/// [`decode_insert`] for a caller that already resolved the rules major.
+pub(crate) fn decode_insert_for_major(
+    data: &[u8],
+    header: &RecordHeader,
+    profile: crate::RecordProfile,
+    major: u32,
+    options: ParseOptions,
+) -> Option<Result<InsertEntity, InsertError>> {
+    if header.type_id != INSERT {
         return None;
     }
     Some((|| {
-        let major = major(product_build).ok_or("Unqualified INSERT product build")?;
         let width = match (profile, major) {
             (crate::RecordProfile::Schema3Attributes33, 10..=17) => 33,
             (crate::RecordProfile::Schema3Attributes37, 18) => 37,

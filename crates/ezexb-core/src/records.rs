@@ -327,13 +327,54 @@ fn record_extension(
     }
     let attributes = reader.take(width)?;
     let body_start = body.offset as usize;
-    if reader.data[body_start..body_start + attributes.len()] != *attributes {
-        return Err(FrameError::Unsupported(format!(
-            "Schema-3 repeated attributes at decoded offset {attributes_start} do not match the initial body prefix for profile {}; no resynchronization attempted.",
-            profile.as_str()
-        )));
-    }
+    let repeats_body_prefix = reader.data[body_start..body_start + attributes.len()] == *attributes;
     let attributes_span = span(attributes_start, reader.offset);
+    let (display_cache, tail_start, tail_raw) = if repeats_body_prefix {
+        extension_display(reader, profile, budget, depth)?
+    } else {
+        // Some classes (block-reference arrays) keep their attribute block only
+        // here: the body opens with the class's own fields. Such a record is
+        // framed only when everything behind the attributes frames as well;
+        // otherwise the mismatch is reported as before, so a wrong profile or an
+        // unknown extension layout still stops without resynchronization.
+        let used = *budget;
+        match extension_display(reader, profile, budget, depth) {
+            Ok(framed) => framed,
+            Err(FrameError::Invalid(error @ Error::ResourceLimit { .. })) => {
+                return Err(error.into())
+            }
+            Err(_) => {
+                *budget = used;
+                return Err(FrameError::Unsupported(format!(
+                    "Schema-3 repeated attributes at decoded offset {attributes_start} do not match the initial body prefix for profile {}; no resynchronization attempted.",
+                    profile.as_str()
+                )));
+            }
+        }
+    };
+    Ok(RecordExtension {
+        span: span(start, reader.offset),
+        relation_section_span,
+        relation_type_id,
+        relations,
+        header_span,
+        header_u16_raw,
+        header_u32_raw,
+        attributes_span,
+        display_cache,
+        tail_span: span(tail_start, reader.offset),
+        tail_raw,
+    })
+}
+
+/// The display cache and the trailing-object presence byte behind the repeated
+/// attributes of a schema-3 extension.
+fn extension_display(
+    reader: &mut Reader<'_>,
+    profile: RecordProfile,
+    budget: &mut u64,
+    depth: u64,
+) -> Result<(RecordDisplayCache, usize, u8), FrameError> {
     let display_start = reader.offset;
     let present = presence(reader, "display cache")?;
     let presence_span = span(display_start, reader.offset);
@@ -392,19 +433,22 @@ fn record_extension(
             "Unsupported trailing-object presence {tail_raw} at decoded offset {tail_start}; no resynchronization attempted."
         )));
     }
-    Ok(RecordExtension {
-        span: span(start, reader.offset),
-        relation_section_span,
-        relation_type_id,
-        relations,
-        header_span,
-        header_u16_raw,
-        header_u32_raw,
-        attributes_span,
-        display_cache,
-        tail_span: span(tail_start, reader.offset),
-        tail_raw,
-    })
+    Ok((display_cache, tail_start, tail_raw))
+}
+
+/// Whether the body of a record starts with its entity attribute block. Records
+/// without a schema-3 extension always do; an extension repeats the block, and a
+/// class that keeps its attributes only there has a body that differs.
+pub(crate) fn body_starts_with_attributes(data: &[u8], header: &RecordHeader) -> bool {
+    let Some(extension) = &header.extension else {
+        return true;
+    };
+    let width = extension.attributes_span.length as usize;
+    let body = header.payload_span.offset as usize;
+    let repeated = extension.attributes_span.offset as usize;
+    header.payload_span.length >= width as u64
+        && data.get(body..body + width).is_some()
+        && data.get(body..body + width) == data.get(repeated..repeated + width)
 }
 
 /// One property value: a tag, a UTF-16 key and a tag-specific body. Tag 10 is a
@@ -1534,7 +1578,6 @@ mod tests {
         for offset in [
             extension.span.offset,
             extension.header_span.offset,
-            extension.attributes_span.offset,
             extension.display_cache.span.offset,
             extension.display_cache.span.offset + 1,
         ] {
@@ -1547,5 +1590,86 @@ mod tests {
             assert!(!result.framing_complete);
             assert_eq!(result.unparsed_span.unwrap().offset, 172);
         }
+        assert!(body_starts_with_attributes(&data, &valid.records[0]));
+    }
+
+    #[test]
+    fn schema3_attributes_kept_only_in_the_extension_frame_when_the_rest_does() {
+        // A class whose body opens with its own fields: the extension's attribute
+        // block is not a repetition of the body prefix.
+        let children = [simple_record(1, &[0; 81])];
+        let mut data = header();
+        data.extend(schema3_record(33, Some(&children), &[], false));
+        data.extend(simple_record(1, &[0; 81]));
+        let valid =
+            inspect_record_headers_with_profile(&data, ParseOptions::default(), profile33())
+                .unwrap();
+        let extension = valid.records[0].extension.clone().unwrap();
+        let attributes = extension.attributes_span.offset as usize;
+        let mut own_fields = data.clone();
+        for byte in &mut own_fields[attributes..attributes + 33] {
+            *byte ^= 0xff;
+        }
+        let result =
+            inspect_record_headers_with_profile(&own_fields, ParseOptions::default(), profile33())
+                .unwrap();
+        assert!(result.framing_complete, "{:?}", result.stop_reason);
+        assert_eq!(result.records.len(), 2);
+        let record = &result.records[0];
+        assert!(!body_starts_with_attributes(&own_fields, record));
+        assert!(body_starts_with_attributes(&own_fields, &result.records[1]));
+        let framed = record.extension.as_ref().unwrap();
+        assert_eq!(framed.attributes_span, extension.attributes_span);
+        assert_eq!(framed.display_cache.records.len(), 1);
+        assert_eq!(result.records[1].span.offset, valid.records[1].span.offset);
+        // The budget is the same as for a repeated prefix.
+        let options = ParseOptions {
+            max_records: 3,
+            ..ParseOptions::default()
+        };
+        assert!(inspect_record_headers_with_profile(&own_fields, options, profile33()).is_ok());
+        let options = ParseOptions {
+            max_records: 1,
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            inspect_record_headers_with_profile(&own_fields, options, profile33()),
+            Err(Error::ResourceLimit {
+                name: "max_records",
+                ..
+            })
+        ));
+        // Anything behind the attributes that does not frame keeps the old stop:
+        // an unknown cache presence, a foreign cache type, an unknown child, a
+        // nonzero trailing byte or a truncated stream.
+        let cache = extension.display_cache.span.offset as usize;
+        let tail = extension.tail_span.offset as usize;
+        for offset in [cache, cache + 1, cache + 21 + 24, tail] {
+            let mut broken = own_fields.clone();
+            broken[offset] ^= 0x55;
+            let result =
+                inspect_record_headers_with_profile(&broken, ParseOptions::default(), profile33())
+                    .unwrap();
+            assert!(result.records.is_empty(), "mutation offset {offset}");
+            assert!(result.stop_reason.unwrap().contains("do not match"));
+            assert_eq!(result.unparsed_span.unwrap().offset, 172);
+        }
+        let result = inspect_record_headers_with_profile(
+            &own_fields[..tail],
+            ParseOptions::default(),
+            profile33(),
+        )
+        .unwrap();
+        assert!(result.records.is_empty());
+        assert!(result.stop_reason.unwrap().contains("do not match"));
+        // A wrong profile is still a clean stop, never an accepted record.
+        let wrong = inspect_record_headers_with_profile(
+            &data,
+            ParseOptions::default(),
+            Some(RecordProfile::Schema3Attributes37),
+        )
+        .unwrap();
+        assert!(wrong.records.is_empty());
+        assert!(wrong.stop_reason.unwrap().contains("do not match"));
     }
 }

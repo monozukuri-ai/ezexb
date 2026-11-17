@@ -234,6 +234,11 @@ pub fn transform_primitive(
                 "Degenerate ARC retains stored values but has no qualified world curve.".into(),
             );
         }
+        PrimitiveGeometry::Xline { .. } => {
+            return Err(
+                "Construction line is unbounded; no bounded world curve is produced.".into(),
+            );
+        }
         PrimitiveGeometry::Point { point } => {
             return Ok(WorldCurve::Point {
                 point: transform.transform_point(*point)?,
@@ -250,6 +255,7 @@ pub fn transform_primitive(
             radius,
             x_axis,
             y_axis,
+            ..
         } => (
             *center,
             *radius,
@@ -377,6 +383,7 @@ pub(crate) fn transform_polyline(
                 sweep_angle: 4. * bulge.atan().abs(),
                 start,
                 end,
+                stored_axes: None,
             }
         };
         segments.push(WorldPolylineSegment {
@@ -599,6 +606,24 @@ pub fn expand_world(
         .iter()
         .find(|s| s.id == space_id)
         .ok_or(Error::InvalidInput("Requested world space is unavailable."))?;
+    expand_block(
+        document,
+        space_id,
+        space.block_id,
+        &WorldTransform::identity(),
+        options,
+    )
+}
+
+/// Expand one block definition under `transform`: a stored space from its
+/// identity transform, or the block a cached display record references.
+pub(crate) fn expand_block(
+    document: &Document,
+    space_id: i32,
+    block_id: i32,
+    transform: &WorldTransform,
+    options: ParseOptions,
+) -> Result<WorldScene, Error> {
     let mut blocks = HashMap::new();
     for block in &document.blocks {
         if blocks.insert(block.definition.id, Vec::new()).is_some() {
@@ -619,7 +644,7 @@ pub fn expand_world(
         options,
         scene: WorldScene {
             space_id,
-            root_block_id: space.block_id,
+            root_block_id: block_id,
             source_document_complete: document.report.complete,
             transforms_complete: true,
             geometry_complete: true,
@@ -632,8 +657,8 @@ pub fn expand_world(
         },
     };
     expansion.block(
-        space.block_id,
-        &WorldTransform::identity(),
+        block_id,
+        transform,
         None,
         &mut Vec::new(),
         &mut HashSet::new(),
@@ -717,6 +742,7 @@ mod tests {
             radius: 3.,
             x_axis: [1., 0., 0.],
             y_axis: [0., 1., 0.],
+            stored_axes: None,
         };
         let mut transform = WorldTransform::identity();
         transform.matrix[0] = 2.;

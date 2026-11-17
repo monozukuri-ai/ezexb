@@ -297,6 +297,7 @@ fn reads_primitives_layers_colors_and_line_styles() {
             radius,
             x_axis,
             y_axis,
+            ..
         }) => {
             assert_eq!((*center, *radius), ([10.0, 10.0, 0.0], 5.0));
             assert_eq!((*x_axis, *y_axis), ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]));

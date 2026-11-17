@@ -26,7 +26,17 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .bom import BomTable, _bom
-from .complex import Dimension, Ellipse, Hatch, Nurbs, Solid, StoredSolid, Symbol, _decode
+from .complex import (
+    CachedDisplay,
+    Dimension,
+    Ellipse,
+    Hatch,
+    Nurbs,
+    Solid,
+    StoredSolid,
+    Symbol,
+    _decode,
+)
 from .content import FileInfo, RecordPropertyGroup, SourceSpan, TextField, _file_info
 from .inspection import EntryInfo
 from .partno import PartNumber, _partno
@@ -123,12 +133,24 @@ class Line:
 
 
 @dataclass(frozen=True, slots=True)
+class Xline:
+    """A construction line: unbounded in both directions through ``point``."""
+
+    point: tuple[float, float, float]
+    direction: tuple[float, float, float]
+    kind: Literal["Xline"] = "Xline"
+
+
+@dataclass(frozen=True, slots=True)
 class Circle:
     center: tuple[float, float, float]
     radius: float
     x_axis: tuple[float, float, float]
     y_axis: tuple[float, float, float]
     kind: Literal["Circle"] = "Circle"
+    #: The stored X and Y vectors when they were not an orthonormal basis; ``x_axis``
+    #: and ``y_axis`` are then the basis the native display uses. ``None`` otherwise.
+    stored_axes: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +163,11 @@ class Arc:
     start: tuple[float, float, float]
     end: tuple[float, float, float]
     kind: Literal["Arc"] = "Arc"
+    #: The stored X and Y vectors when they were not an orthonormal basis. The native
+    #: display draws such an arc with the stored radius, starting along the stored X
+    #: vector and turning toward the stored Y vector; ``x_axis`` and ``y_axis`` are
+    #: that orthonormal basis. ``None`` for an arc stored with one.
+    stored_axes: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +272,7 @@ Geometry = (
     DegenerateArc
     | Point
     | Line
+    | Xline
     | Circle
     | Arc
     | Polyline
@@ -261,6 +289,7 @@ Geometry = (
     | View2D
     | Table
     | Symbol
+    | CachedDisplay
 )
 
 
@@ -503,6 +532,7 @@ _TUPLE_KEYS = frozenset(
         "insertion",
         "normal",
         "point",
+        "direction",
         "dashes",
         "entity_indices",
         "scales",
@@ -528,7 +558,7 @@ def _convert(cls: type, value: dict[str, Any]) -> Any:
                 item = tuple(item)
             elif key == "unknown_fields":
                 item = tuple(SourceSpan(**span) for span in item)
-            elif key in ("line_cache_points", "column_entries_raw"):
+            elif key in ("line_cache_points", "column_entries_raw", "stored_axes"):
                 item = tuple(tuple(p) for p in item)
         converted[key] = item
     value = converted
@@ -593,6 +623,7 @@ _ENTITY_GEOMETRY = {
     "DegenerateArc": DegenerateArc,
     "Point": Point,
     "Line": Line,
+    "Xline": Xline,
     "Circle": Circle,
     "Arc": Arc,
     "Polyline": Polyline,
@@ -609,6 +640,7 @@ _ENTITY_GEOMETRY = {
     "View2D": View2D,
     "Table": Table,
     "Symbol": Symbol,
+    "CachedDisplay": CachedDisplay,
 }
 
 
@@ -671,7 +703,7 @@ def _entity(item: dict[str, Any], property_group: Any, strings: dict[str, str]) 
         _partno
         if cls is PartNumber
         else _decode
-        if cls in (Dimension, Hatch, Solid, Ellipse, Nurbs, Symbol)
+        if cls in (Dimension, Hatch, Solid, Ellipse, Nurbs, Symbol, CachedDisplay)
         else _convert
     )
     item["geometry"] = (

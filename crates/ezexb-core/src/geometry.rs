@@ -8,6 +8,7 @@ const LINE: &str = "17ecf72d-c046-4e9a-8416-fd8220fd33b5";
 const CIRCLE: &str = "7587733c-3df6-4c9d-8b08-20aeffe18291";
 const ARC: &str = "91d6556b-0fb8-4e13-998f-bdacbfd31025";
 const POINT: &str = "d6da372e-0f4f-4bfb-9e92-3b3363ac6c22";
+const XLINE: &str = "3d98eac3-4cf1-444a-8204-fb392ccd23c8";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EntityAttributes {
@@ -47,11 +48,22 @@ pub enum PrimitiveGeometry {
         start: [f64; 3],
         end: [f64; 3],
     },
+    /// A construction line: unbounded in both directions through `point` along
+    /// the stored unit `direction`. No end points are stored or inferred.
+    Xline {
+        point: [f64; 3],
+        direction: [f64; 3],
+    },
     Circle {
         center: [f64; 3],
         radius: f64,
         x_axis: [f64; 3],
         y_axis: [f64; 3],
+        /// The stored X and Y vectors, present only when they were not an
+        /// orthonormal basis; `x_axis`/`y_axis` then hold the basis the native
+        /// display uses (see [`PrimitiveGeometry::Arc`]).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stored_axes: Option<[[f64; 3]; 2]>,
     },
     Arc {
         center: [f64; 3],
@@ -63,7 +75,29 @@ pub enum PrimitiveGeometry {
         sweep_angle: f64,
         start: [f64; 3],
         end: [f64; 3],
+        /// The stored X and Y vectors, present only when they were not an
+        /// orthonormal basis. The native display draws such a record as a
+        /// circular arc of the stored radius that starts along the stored X
+        /// vector and turns toward the stored Y vector: the vector lengths and
+        /// the angle between them do not change the curve. `x_axis`/`y_axis`
+        /// hold that orthonormal basis.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stored_axes: Option<[[f64; 3]; 2]>,
     },
+}
+
+/// Tolerance of the orthonormal-basis test for stored circular primitives.
+const BASIS_TOLERANCE: f64 = 1e-9;
+
+/// The native planar loaders discard Z. A stored Z that is only floating-point
+/// residue of the XY magnitude is accepted; anything larger is refused rather
+/// than silently flattened.
+fn planar(z: f64, scale: f64) -> bool {
+    z.abs() <= 1e-9 * scale.abs().max(1.0)
+}
+
+fn planar_point(point: &[f64; 3]) -> bool {
+    planar(point[2], point[0].abs().max(point[1].abs()))
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -134,7 +168,7 @@ pub(crate) fn decode_primitive(
     profile: RecordProfile,
 ) -> Option<Result<PrimitiveEntity, String>> {
     let kind = header.type_id.as_str();
-    if !matches!(kind, LINE | CIRCLE | ARC | POINT) {
+    if !matches!(kind, LINE | CIRCLE | ARC | POINT | XLINE) {
         return None;
     }
     Some((|| {
@@ -147,7 +181,7 @@ pub(crate) fn decode_primitive(
         let width = attribute_width(profile);
         let geometry_size = match kind {
             POINT => 24,
-            LINE => 48,
+            LINE | XLINE => 48,
             _ => 88,
         };
         if header.payload_span.length != (width + geometry_size) as u64 {
@@ -170,12 +204,31 @@ pub(crate) fn decode_primitive(
                 return Err("Non-finite POINT coordinate.".into());
             }
             // The native point loader reads XYZ, then discards Z.
-            if point[2] != 0.0 {
+            if !planar_point(&point) {
                 return Err(
                     "Non-planar POINT coordinates are outside the supported profile.".into(),
                 );
             }
             PrimitiveGeometry::Point { point }
+        } else if kind == XLINE {
+            let point = vector(0);
+            let direction = vector(24);
+            if point
+                .iter()
+                .chain(&direction)
+                .any(|value| !value.is_finite())
+            {
+                return Err("Non-finite XLINE value.".into());
+            }
+            if !planar_point(&point) || !planar(direction[2], 1.0) {
+                return Err("Non-planar XLINE values are outside the supported profile.".into());
+            }
+            // The observed records store a unit vector; a point pair or a scaled
+            // vector would be another layout.
+            if (direction[0].hypot(direction[1]) - 1.0).abs() > BASIS_TOLERANCE {
+                return Err("XLINE direction is not a unit vector.".into());
+            }
+            PrimitiveGeometry::Xline { point, direction }
         } else if kind == LINE {
             let start = vector(0);
             let end = vector(24);
@@ -183,7 +236,7 @@ pub(crate) fn decode_primitive(
                 return Err("Non-finite LINE coordinate.".into());
             }
             // The native planar loader discards Z. Refuse to silently do so.
-            if start[2] != 0.0 || end[2] != 0.0 {
+            if !planar_point(&start) || !planar_point(&end) {
                 return Err(
                     "Non-planar LINE coordinates are outside the supported profile.".into(),
                 );
@@ -225,7 +278,10 @@ pub(crate) fn decode_primitive(
                 }
                 return Err("Degenerate circular primitive: radius must be positive.".into());
             }
-            if center[2] != 0.0 || x_axis[2] != 0.0 || y_axis[2] != 0.0 {
+            if !planar(center[2], center[0].abs().max(center[1].abs()).max(radius))
+                || !planar(x_axis[2], x_axis[0].abs().max(x_axis[1].abs()))
+                || !planar(y_axis[2], y_axis[0].abs().max(y_axis[1].abs()))
+            {
                 return Err(
                     "Non-planar circular primitive is outside the supported profile.".into(),
                 );
@@ -233,9 +289,33 @@ pub(crate) fn decode_primitive(
             let x_norm = x_axis[0].hypot(x_axis[1]);
             let y_norm = y_axis[0].hypot(y_axis[1]);
             let dot = x_axis[0] * y_axis[0] + x_axis[1] * y_axis[1];
-            if (x_norm - 1.0).abs() > 1e-9 || (y_norm - 1.0).abs() > 1e-9 || dot.abs() > 1e-9 {
-                return Err("Circular primitive axes are not an orthonormal XY basis.".into());
-            }
+            let orthonormal = (x_norm - 1.0).abs() <= BASIS_TOLERANCE
+                && (y_norm - 1.0).abs() <= BASIS_TOLERANCE
+                && dot.abs() <= BASIS_TOLERANCE;
+            let (x_axis, y_axis, stored_axes) = if orthonormal {
+                (x_axis, y_axis, None)
+            } else {
+                // Scaled, skewed or unequal stored vectors (records that went through
+                // a scale or a non-uniform transform). The native display keeps the
+                // stored radius, starts along the stored X vector and turns toward
+                // the stored Y vector; only the direction of X and the side Y lies on
+                // matter. A zero or parallel pair has no such side and stays refused.
+                let cross = x_axis[0] * y_axis[1] - x_axis[1] * y_axis[0];
+                let sine = cross / (x_norm * y_norm);
+                if !sine.is_finite() || sine.abs() < BASIS_TOLERANCE {
+                    return Err("Circular primitive basis vectors are zero or parallel.".into());
+                }
+                let unit_x = [x_axis[0] / x_norm, x_axis[1] / x_norm, 0.0];
+                if unit_x.iter().any(|value| !value.is_finite()) {
+                    return Err("Circular primitive basis normalization overflowed.".into());
+                }
+                let unit_y = if cross > 0.0 {
+                    [-unit_x[1], unit_x[0], 0.0]
+                } else {
+                    [unit_x[1], -unit_x[0], 0.0]
+                };
+                (unit_x, unit_y, Some([x_axis, y_axis]))
+            };
             if !(0.0 < sweep_angle && sweep_angle <= std::f64::consts::TAU) {
                 return Err("Circular primitive sweep is outside (0, 2*pi] radians.".into());
             }
@@ -248,6 +328,7 @@ pub(crate) fn decode_primitive(
                     radius,
                     x_axis,
                     y_axis,
+                    stored_axes,
                 }
             } else {
                 let (sin, cos) = sweep_angle.sin_cos();
@@ -270,6 +351,7 @@ pub(crate) fn decode_primitive(
                     sweep_angle,
                     start,
                     end,
+                    stored_axes,
                 }
             }
         };
@@ -497,8 +579,10 @@ mod tests {
             (2, 1.0),
             (3, 0.0),
             (3, -1.0),
-            (4, 2.0),
-            (7, 1.0),
+            (4, 0.0),  // Zero X vector: no start direction.
+            (8, 0.0),  // Zero Y vector: no turning side.
+            (6, 0.5),  // X leaves the XY plane.
+            (9, -0.5), // Y leaves the XY plane.
             (10, 0.0),
             (10, 7.0),
         ] {
@@ -508,9 +592,21 @@ mod tests {
             assert!(
                 decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
                     .unwrap()
-                    .is_err()
+                    .is_err(),
+                "index {index} value {value}"
             );
         }
+        // Parallel stored vectors have no side to turn toward.
+        let mut parallel = baseline;
+        parallel[7] = 3.0;
+        parallel[8] = 0.0;
+        let (data, header) = fixture(ARC, 1, 33, &parallel);
+        assert!(
+            decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+                .unwrap()
+                .unwrap_err()
+                .contains("zero or parallel")
+        );
         let (data, header) = fixture(CIRCLE, 1, 33, &baseline);
         assert!(
             decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
@@ -525,6 +621,230 @@ mod tests {
                 .unwrap_err()
                 .contains("Non-planar")
         );
+    }
+
+    fn arc(values: &[f64; 11]) -> PrimitiveGeometry {
+        let (data, header) = fixture(ARC, 1, 33, values);
+        decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+            .unwrap()
+            .unwrap()
+            .geometry
+    }
+
+    #[test]
+    fn nonorthonormal_stored_basis_keeps_the_radius_and_the_x_direction() {
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let close = |a: [f64; 3], b: [f64; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-12);
+        // (stored X, stored Y, expected unit Y, expected end for a quarter sweep)
+        let (s, c) = 110f64.to_radians().sin_cos();
+        for (x, y, unit_y, end) in [
+            // Both vectors scaled by two: the radius stays five.
+            ([2., 0.], [0., 2.], [0., 1., 0.], [10., 25., 0.]),
+            // Scaled by one half.
+            ([0.5, 0.], [0., 0.5], [0., 1., 0.], [10., 25., 0.]),
+            // Unit vectors 110 degrees apart: still a quarter turn from X.
+            ([1., 0.], [c, s], [0., 1., 0.], [10., 25., 0.]),
+            // Unequal lengths.
+            ([2., 0.], [0., 1.], [0., 1., 0.], [10., 25., 0.]),
+            // Y on the clockwise side of X.
+            ([2., 0.], [0., -2.], [0., -1., 0.], [10., 15., 0.]),
+            ([1., 0.], [-c, -s], [0., -1., 0.], [10., 15., 0.]),
+        ] {
+            let values = [10., 20., 0., 5., x[0], x[1], 0., y[0], y[1], 0., quarter];
+            let PrimitiveGeometry::Arc {
+                radius,
+                x_axis,
+                y_axis,
+                start,
+                end: decoded_end,
+                stored_axes,
+                ..
+            } = arc(&values)
+            else {
+                panic!("ARC expected")
+            };
+            assert_eq!(radius, 5.);
+            assert_eq!(x_axis, [1., 0., 0.]);
+            assert!(close(y_axis, unit_y), "{x:?} {y:?}");
+            assert!(close(start, [15., 20., 0.]));
+            assert!(close(decoded_end, end), "{x:?} {y:?} {decoded_end:?}");
+            assert_eq!(stored_axes, Some([[x[0], x[1], 0.], [y[0], y[1], 0.]]));
+        }
+        // A rotated start direction is kept; the lengths are not.
+        let (s30, c30) = 30f64.to_radians().sin_cos();
+        let values = [
+            0.,
+            0.,
+            0.,
+            4.,
+            3. * c30,
+            3. * s30,
+            0.,
+            -0.2 * s30,
+            0.2 * c30,
+            0.,
+            quarter,
+        ];
+        let PrimitiveGeometry::Arc { start, end, .. } = arc(&values) else {
+            panic!("ARC expected")
+        };
+        assert!(close(start, [4. * c30, 4. * s30, 0.]));
+        assert!(close(end, [-4. * s30, 4. * c30, 0.]));
+        // An orthonormal basis is returned as stored, without the extra field.
+        let values = [0., 0., 0., 4., 0., 1., 0., 1., 0., 0., quarter];
+        let geometry = arc(&values);
+        assert!(matches!(
+            geometry,
+            PrimitiveGeometry::Arc {
+                stored_axes: None,
+                x_axis: [0., 1., 0.],
+                y_axis: [1., 0., 0.],
+                ..
+            }
+        ));
+        assert!(serde_json::to_value(&geometry)
+            .unwrap()
+            .get("stored_axes")
+            .is_none());
+        // CIRCLE: the stored vectors do not change the circle.
+        let mut circle = [
+            1.,
+            2.,
+            0.,
+            6.,
+            2.,
+            0.,
+            0.,
+            0.,
+            2.,
+            0.,
+            std::f64::consts::TAU,
+        ];
+        let (data, header) = fixture(CIRCLE, 100, 33, &circle);
+        let geometry = decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+            .unwrap()
+            .unwrap()
+            .geometry;
+        assert!(matches!(
+            geometry,
+            PrimitiveGeometry::Circle {
+                radius: 6.0,
+                x_axis: [1., 0., 0.],
+                y_axis: [0., 1., 0.],
+                stored_axes: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(&geometry).unwrap()["stored_axes"],
+            serde_json::json!([[2., 0., 0.], [0., 2., 0.]])
+        );
+        circle[7] = 4.;
+        circle[8] = 0.;
+        let (data, header) = fixture(CIRCLE, 100, 33, &circle);
+        assert!(
+            decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn construction_line_keeps_its_point_and_unit_direction() {
+        for (width, profile) in [
+            (33, RecordProfile::Schema3Attributes33),
+            (37, RecordProfile::Schema3Attributes37),
+        ] {
+            let values = [-12.5, 40.0, 0.0, 0.0, -1.0, 0.0];
+            let (data, header) = fixture(XLINE, 100, width, &values);
+            let entity = decode_primitive(&data, &header, profile).unwrap().unwrap();
+            assert_eq!(
+                entity.geometry,
+                PrimitiveGeometry::Xline {
+                    point: [-12.5, 40.0, 0.0],
+                    direction: [0.0, -1.0, 0.0]
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(&entity.geometry).unwrap()["kind"],
+                "Xline"
+            );
+            // Unbounded: there is no bounded world curve to produce.
+            assert!(crate::transform_primitive(
+                &entity.geometry,
+                &crate::WorldTransform::identity()
+            )
+            .is_err());
+            for end in 0..data.len() {
+                assert!(decode_primitive(&data[..end], &header, profile)
+                    .unwrap()
+                    .is_err());
+            }
+            for (index, value) in [
+                (0, f64::NAN),
+                (2, 4.0),
+                (3, 2.0),  // Not a unit vector.
+                (4, 0.0),  // Zero vector.
+                (5, 0.25), // Leaves the XY plane.
+            ] {
+                let mut altered = values;
+                altered[index] = value;
+                let (data, header) = fixture(XLINE, 1, width, &altered);
+                assert!(
+                    decode_primitive(&data, &header, profile).unwrap().is_err(),
+                    "{index}"
+                );
+            }
+            let (data, header) = fixture(XLINE, 1, width, &values[..5]);
+            assert!(decode_primitive(&data, &header, profile).unwrap().is_err());
+        }
+    }
+
+    #[test]
+    fn floating_point_residue_in_z_is_planar_and_real_z_is_not() {
+        let (data, header) = fixture(LINE, 1, 33, &[0.0, 0.0, 0.0, 35.0, 2.0, 2.65e-28]);
+        let line = decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            line.geometry,
+            PrimitiveGeometry::Line {
+                start: [0.0, 0.0, 0.0],
+                end: [35.0, 2.0, 2.65e-28]
+            }
+        );
+        // Residue scales with the coordinates; a real offset never passes.
+        let (data, header) = fixture(LINE, 1, 33, &[4000.0, 0.0, -3.2e-13, 4100.0, 2.0, 0.0]);
+        assert!(
+            decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+                .unwrap()
+                .is_ok()
+        );
+        for z in [1e-6, -0.5, 3.0] {
+            let (data, header) = fixture(LINE, 1, 33, &[0.0, 0.0, z, 35.0, 2.0, 0.0]);
+            assert!(
+                decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+                    .unwrap()
+                    .unwrap_err()
+                    .contains("Non-planar"),
+                "{z}"
+            );
+            let (data, header) = fixture(POINT, 1, 33, &[1.0, 2.0, z]);
+            assert!(
+                decode_primitive(&data, &header, RecordProfile::Schema3Attributes33)
+                    .unwrap()
+                    .is_err()
+            );
+        }
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let values = [1., 2., 1e-16, 5., 1., 0., 1e-17, 0., 1., -1e-18, quarter];
+        assert!(matches!(
+            arc(&values),
+            PrimitiveGeometry::Arc {
+                stored_axes: None,
+                ..
+            }
+        ));
     }
 
     #[test]

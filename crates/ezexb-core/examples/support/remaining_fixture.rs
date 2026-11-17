@@ -4,6 +4,8 @@
 pub mod base;
 #[path = "bom_fixture.rs"]
 pub mod bom;
+#[path = "display_fixture.rs"]
+pub mod display;
 #[path = "table_fixture.rs"]
 pub mod table;
 #[path = "view2d_fixture.rs"]

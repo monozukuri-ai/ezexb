@@ -48,20 +48,22 @@ use `read()` to access the additional supported entity layouts.
 | Object | Returned data | Boundary |
 | --- | --- | --- |
 | POINT | Stored XYZ position and attributes | 57/61-byte bodies; finite planar coordinates |
-| LINE | Stored endpoints, 33/37-byte attributes | 81/85-byte bodies; planar finite coordinates |
-| CIRCLE / ARC | Center, radius, basis; ARC sweep and endpoints | Positive radius, orthonormal XY basis; sweep in radians, basis preserves handedness |
+| LINE | Stored endpoints, 33/37-byte attributes | 81/85-byte bodies; planar finite coordinates (a stored Z that is only floating-point residue is accepted and kept) |
+| Xline | Construction line: stored point and unit direction | 81/85-byte bodies; unbounded in both directions, so no end points and no world curve |
+| CIRCLE / ARC | Center, radius, basis; ARC sweep and endpoints | Positive radius; sweep in radians, basis preserves handedness. An orthonormal XY basis is returned as stored. Stored vectors that are scaled or not perpendicular are read as the native display draws them (see below), with a `nonorthonormal_circular_basis` diagnostic |
 | DegenerateArc | Stored center, zero radius/basis and full-turn sweep | Only the qualified zero-radius/zero-basis pattern; `degenerate_geometry` diagnostic, no inferred curve or point |
-| POLYLINE | Vertices, bulges, widths, closure and normal | Version-dependent vertex encoding; zero discarded legacy Z and default normal |
+| POLYLINE | Vertices, bulges, widths, closure and normal | Version-dependent vertex encoding; zero discarded legacy Z and default normal. A stored zero normal vector names no plane: the vertices are read in the XY plane as stored, with a `degenerate_polyline_normal` diagnostic |
 | TEXT | Unicode, insertion, stored dimensions, rotation/scale, raw formatting; decoded font/spacing styles; save major >= 15 column layout kept raw (`column_*`) | Stored values remain distinct from native layout; a nonzero column count is reported as `unsupported_text_semantics` and not applied |
 | INSERT / AttributeDefinition | Block reference, components/matrix, attached tag/value/TEXT; definition tag/prompt/default/TEXT | Visibility uncertainty is explicit; clipping and unusual embedded objects remain unsupported |
 | HATCH / SOLID | Boundary loops, native curve parameters, pattern/dash data or gradient fields; a hatch's cached line points when the file stores them before the boundary (`line_cache_points`, field files of builds 16.0–18.0) | Nonempty association maps remain unsupported; no fill regeneration |
-| Dimension | Linear, diameter, radius, leader, two-line angle, chamfer, coordinate list, half, large arc, origin and pitch; stored value/text/locations and typed cached presentation | Construction, overrides and associativity remain in `unresolved_semantics_span`; read remains incomplete |
+| Dimension | Linear, diameter, radius, leader, two-line angle, three-point angle, chamfer, coordinate list, half, large arc, origin and pitch; stored value/text/locations and typed cached presentation, including cached block references (block arrowheads) | Construction, overrides and associativity remain in `unresolved_semantics_span`; read remains incomplete |
 | Symbol | Roughness, geometric tolerance, section marker and datum; selected captions, raw modes, leader/cut points and cached presentation | Build 10/15 layouts only; reference objects and remaining semantics retain spans; read remains incomplete |
 | PartNumber | Style/table references, raw modes, reference-point data, leader points, scale, item indices and cached presentations | Build 10 only, empty override map; table/style resolution and number regeneration remain unsupported |
 | Table | General/hole-chart table columns, sparse rows/cells, text/block contents, typed raw properties, placement, break data and hole-chart fields | Build 18 only; raw modes, styles, linked data and regeneration remain unresolved |
 | BomTable | External data-table reference, placement, break/rewind points and typed header/row presentations | Build 10 only; semantic cell assignments and external table lookup are unresolved |
 | View2D | Inherited block-reference fields, name, view type and absent/circular clip | Build 10 only, no attached attributes; raw clip reference bytes preserved; no view expansion or clip evaluation |
-| NURBS / ELLIPSE | Stored control points/knots or axes/radii/angular fields; save major >= 15 adds `fit_point_count_raw`/`fit_tolerance` | Only an empty fit-point section (count -1) is qualified; no fit-point reconstruction or native tessellation |
+| NURBS / ELLIPSE | Stored control points/knots or axes/radii/angular fields; save major >= 15 adds the stored `fit_points` (most records store none), `fit_point_count_raw` (the -1 that ends the list) and `fit_tolerance` | Fit points are returned as stored; the curve is the control points and knots. No fit-point reconstruction or native tessellation |
+| CachedDisplay | The display records CAXA cached with a record whose own fields are not decoded: an unknown class, or a symbol, part number, table or view of another save version | Only records that carry such a list (see below); values, references and regeneration stay in `unresolved_semantics_span`; `unsupported_entity_semantics` keeps the read incomplete |
 | Layer / linetype / text style | Names, stored color/width, dash data, Western/CJK fonts and width/spacing factors | Font files are not embedded or loaded; advanced line styles remain unsupported |
 | Space / block | Names, IDs, membership, paper scale, optional SOLID attachment | Xrefs and unsupported optional objects remain explicit |
 
@@ -71,6 +73,42 @@ presentation records remain nested. They never become ordinary model entities.
 `cached_record_count` counts the existing schema-3 display caches; inline dimension
 presentation is available separately in `Dimension.presentation_records`.
 `entities_in_block(id)` and `entities_in_space(id)` return direct members only.
+
+A stored ARC or CIRCLE normally carries two perpendicular unit vectors. Records that
+went through a scale or a non-uniform transform can carry vectors of another length or
+at another angle. The native display draws such a record as a circular arc of the
+**stored radius** that starts along the stored X vector and turns toward the side the
+stored Y vector lies on; the vector lengths and the angle between them do not change
+the curve. `x_axis`/`y_axis` then hold that orthonormal basis (so `start`, `end` and
+the world curve follow it), `stored_axes` holds the two stored vectors, and the entity
+gets a `nonorthonormal_circular_basis` diagnostic. `stored_axes` is `None` (absent in
+JSON) for a record stored with an orthonormal basis. A zero vector or a parallel pair
+has no such side and stays unsupported.
+
+`CachedDisplay` (`ezexb.complex.CachedDisplay`) is returned for a record whose own
+fields are not decoded when the record carries the display records CAXA cached with
+it. Two stored forms qualify, and nothing is searched for:
+
+- `source == "body"`: the body behind the attribute block opens with a non-empty
+  counted list of framed records, the layout dimensions, engineering symbols, part
+  numbers and tables share. Every byte of the list must frame.
+- `source == "display_cache"`: the schema-3 extension behind the body holds a
+  non-empty display cache (views and block-reference arrays show a cached block
+  reference this way). A class that keeps its attribute block only in that extension
+  is framed and read the same way.
+
+`presentation_records` has the same shape as a dimension's. Besides lines, arcs,
+circles, polylines, texts and fills, a record can be an `Insert` (a cached block
+reference; its stored matrix is not applied, and its target is checked like any
+INSERT) or a nested `CachedDisplay` (an item of a table or a part number, with its own
+attributes and hide flag). The records are what CAXA last drew for the entity, not a
+regeneration: the entity's values, references and style evaluation are not decoded,
+and `unsupported_entity_semantics` names the reason its own decoder gave. A child that
+frames but does not decode keeps its `unsupported_reason` and is reported as
+`unsupported_entity_presentation`. A record of an unknown class without any display
+records stays an `unsupported_entity`. Classes with a qualified layout of their own
+(LINE, CIRCLE, ARC, POINT, POLYLINE, TEXT, HATCH, SOLID, NURBS, ELLIPSE, INSERT,
+attribute definitions) are never retried this way.
 
 `Symbol.data` is a typed `Roughness`, `GeometricTolerance`, `SectionMarker` or
 `Datum` value. Only the fields before `unresolved_semantics_span` are interpreted;
@@ -220,6 +258,21 @@ references. Every unsupported entity includes its ID, type GUID, stream and span
 Unknown nested record framing stops before the containing top-level record;
 there is no GUID search to resume parsing through unknown bytes.
 
+A diagnostic on a returned entity says how its values differ from a plain decoded
+record, and keeps strict reading incomplete:
+
+| Code | Meaning |
+| --- | --- |
+| `unsupported_entity_semantics` | The entity's own fields are not decoded; it is returned as `CachedDisplay` |
+| `unsupported_entity_presentation` | One cached display record of such an entity did not decode |
+| `nonorthonormal_circular_basis` | An ARC or CIRCLE stored scaled or non-perpendicular vectors; the basis was re-derived as the native display draws it |
+| `degenerate_polyline_normal` | A POLYLINE stored a zero normal vector; its vertices are read in the XY plane |
+| `degenerate_geometry` | The zero-radius/zero-basis ARC pattern; no curve is inferred |
+
+Looking for cached display records never fails a read by itself: bytes that are not
+a record list are an absent list. The items examined are charged to `max_records`
+either way, so the cumulative limit bounds the work of a read.
+
 Resource failures remain errors in partial mode. `max_records` applies
 cumulatively to records, properties, relations, compression blocks, context
 entries, vertices and text items processed by one document read.
@@ -278,7 +331,8 @@ curves become `EllipticCurve` with radius-inclusive vectors:
 `p(t) = center + cos(t)*axis_u + sin(t)*axis_v`. Other entities retain their source
 index and instance transform; missing curve conversion has a diagnostic.
 View2D referenced blocks are not expanded, even without a clip, and produce
-`unsupported_world_clip`. DegenerateArc produces no world curve or inferred point.
+`unsupported_world_clip`. DegenerateArc produces no world curve or inferred point,
+and neither does an unbounded Xline.
 
 `source_document_complete`, `transforms_complete`, `geometry_complete`,
 `styles_complete`, and `render_complete` are independent. `WorldScene.complete`
@@ -287,7 +341,9 @@ combines transform/geometry/style completeness of the decoded subset; always che
 always reports `native_display_equivalent=false`.
 
 SVG is a world-XY preview with neutral strokes and system font fallback. It renders
-supported curves, POINT markers, fill boundaries, cached dimension/symbol/part-number/table/BOM presentation and supported plain
+supported curves, POINT markers, fill boundaries, cached dimension/symbol/part-number/table/BOM presentation,
+the records of a `CachedDisplay` (a cached block reference is expanded below its owner;
+hidden records and cyclic references are omitted) and supported plain
 TEXT/attached text. It does not regenerate hatching, native line styles, gradients,
 CAD stroke fonts, wrapping, rich formatting or every text alignment. Unsupported
 text modes and attribute-definition display are omitted with diagnostics. Nominal

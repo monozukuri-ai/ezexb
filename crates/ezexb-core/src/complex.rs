@@ -11,7 +11,7 @@ const HATCH: &str = "79b9b625-ee7f-4fc9-b9a6-39036a219cf7";
 const SOLID: &str = "d7676d4e-b9e0-46c3-894d-e9ef7fb66fb2";
 const NURBS: &str = "838896be-c069-4566-8991-afd750b4547c";
 const ELLIPSE: &str = "85dc7b5d-daac-47c8-a126-ffad50d6cd68";
-const DIMS: [&str; 11] = [
+const DIMS: [&str; 12] = [
     "1da848b5-8c84-4c11-80d6-45cf9b26aa48",
     "f391cb78-240a-4fbd-9e3f-4f19572391fc",
     "aba4bd1e-d922-4b4d-931e-7f4c9d6919e7",
@@ -23,6 +23,7 @@ const DIMS: [&str; 11] = [
     "5744b3d8-69bd-417f-9ea1-9e818dd7c25f", // Large-arc radius
     "0bdf94e2-0699-4ce6-94f8-dee137ae16b4", // Origin
     "432ac627-53ca-4496-a18c-53767f5aa8df", // Pitch
+    "d0e58c76-f166-4241-9943-62e6113a9da4", // Three-point angle
 ];
 const ROUGHNESS: &str = "64e92135-bb0b-4c37-bee3-e7dcdabf179e";
 const GEOMETRIC_TOLERANCE: &str = "9b79570d-4d57-4286-8105-ab9ce81c7f6c";
@@ -68,10 +69,14 @@ pub struct NurbsGeometry {
     pub planar_type_raw: u32,
     pub control_points: Vec<[f64; 4]>,
     pub knots: Vec<f64>,
-    /// Save major >= 15 only: the stored fit-point count (always -1, none) and
-    /// fit tolerance that precede the curve.
+    /// Save major >= 15 only: the word that ends the stored fit-point list (-1)
+    /// and the fit tolerance that precede the curve.
     pub fit_point_count_raw: Option<i32>,
     pub fit_tolerance: Option<f64>,
+    /// Save major >= 15 only: the stored fit points, in their stored order. Most
+    /// records store none; the curve is the control points and knots either way.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub fit_points: Vec<[f64; 3]>,
     pub span: SourceSpan,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -310,6 +315,212 @@ pub enum PresentationGeometry {
     Annotation(AnnotationGeometry),
     Solid(SolidGeometry),
     PartItem(Box<crate::partno::PartItemGeometry>),
+    /// A cached block reference (a block arrowhead of a dimension, the block a
+    /// view or an array displays). The stored matrix is not applied here.
+    Insert(Box<crate::Insert>),
+    /// A cached record of another class, kept through its own cached display.
+    CachedDisplay(Box<CachedDisplayGeometry>),
+}
+
+/// Where the display records of a [`CachedDisplayGeometry`] were stored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CachedDisplaySource {
+    /// The counted record list that opens the body behind the attributes, the
+    /// layout dimensions, engineering symbols, part numbers and tables share.
+    Body,
+    /// The display cache of the schema-3 extension behind the body.
+    DisplayCache,
+}
+
+/// The display records CAXA cached with a record whose own fields are not
+/// decoded for its class or save version. The records are what the native
+/// display last drew for the entity; its values, references and regeneration
+/// stay unresolved in `unresolved_semantics_span`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename = "CachedDisplay")]
+pub struct CachedDisplayGeometry {
+    pub source: CachedDisplaySource,
+    pub presentation_records: Vec<PresentationRecord>,
+    pub presentation_span: SourceSpan,
+    /// The body bytes behind the attributes that are not decoded (for
+    /// [`CachedDisplaySource::Body`], the bytes behind the record list).
+    pub unresolved_semantics_span: SourceSpan,
+    pub span: SourceSpan,
+}
+
+pub(crate) struct CachedDisplayEntity {
+    pub attributes: EntityAttributes,
+    pub geometry: CachedDisplayGeometry,
+}
+
+/// The result of looking for cached display records. `budget_used` is charged
+/// by the caller whether or not an entity was found: a record list that turns
+/// out not to be one still cost the items examined, so the cumulative limit
+/// keeps bounding the work of a read.
+pub(crate) struct CachedDisplayAttempt {
+    pub entity: Option<CachedDisplayEntity>,
+    pub budget_used: u64,
+}
+
+/// Classes with a qualified layout of their own and no cached display records:
+/// a record of one of them that does not decode is not retried here.
+const WITHOUT_CACHED_DISPLAY: [&str; 12] = [
+    "17ecf72d-c046-4e9a-8416-fd8220fd33b5", // LINE
+    "7587733c-3df6-4c9d-8b08-20aeffe18291", // CIRCLE
+    "91d6556b-0fb8-4e13-998f-bdacbfd31025", // ARC
+    "d6da372e-0f4f-4bfb-9e92-3b3363ac6c22", // POINT
+    "56d8e732-ad1f-426d-a4b0-6c5998434583", // POLYLINE
+    "76d76221-4358-465d-bc53-4449b3004657", // TEXT
+    HATCH,
+    SOLID,
+    NURBS,
+    ELLIPSE,
+    crate::context::INSERT,
+    "e218226d-dd73-4a9d-aa95-764b4d3bc072", // Attribute definition
+];
+
+/// Read the display records cached with a record instead of its own fields.
+///
+/// A record qualifies when the body behind its attribute block opens with a
+/// non-empty counted list of framed records (every byte of the list must frame;
+/// nothing is searched for), or when its schema-3 extension holds a non-empty
+/// display cache. No entity means the record has neither and stays unsupported.
+/// The attribute block comes from the body, or from the extension for a class
+/// that keeps it only there. Looking never fails a read by itself: bytes that
+/// are not a record list are an absent list, and the items examined are
+/// returned for the caller to charge.
+pub(crate) fn decode_cached_display(
+    data: &[u8],
+    header: &RecordHeader,
+    profile: RecordProfile,
+    major: u32,
+    options: ParseOptions,
+    depth: u64,
+) -> CachedDisplayAttempt {
+    let none = |budget_used| CachedDisplayAttempt {
+        entity: None,
+        budget_used,
+    };
+    if WITHOUT_CACHED_DISPLAY.contains(&header.type_id.as_str())
+        || !matches!(
+            (profile, major),
+            (RecordProfile::Schema3Attributes33, 10..=17)
+                | (RecordProfile::Schema3Attributes37, 18)
+        )
+        || depth > options.max_record_depth.min(64)
+    {
+        return none(0);
+    }
+    let width = attribute_width(profile);
+    let (Ok(start), Ok(len)) = (
+        usize::try_from(header.payload_span.offset),
+        usize::try_from(header.payload_span.length),
+    ) else {
+        return none(0);
+    };
+    let Some(end) = start.checked_add(len).filter(|end| *end <= data.len()) else {
+        return none(0);
+    };
+    let prefixed = len >= width && crate::records::body_starts_with_attributes(data, header);
+    let attributes = if prefixed {
+        decode_attributes(data, &header.payload_span, profile)
+    } else if let Some(extension) = &header.extension {
+        decode_attributes(data, &extension.attributes_span, profile)
+    } else {
+        return none(0);
+    };
+    let Ok(attributes) = attributes else {
+        return none(0);
+    };
+    let own_fields = if prefixed { start + width } else { start };
+    let own_span = SourceSpan {
+        offset: own_fields as u64,
+        length: (end - own_fields) as u64,
+    };
+    let mut examined = 0;
+    if prefixed {
+        let mut c = Cursor {
+            data: &data[..end],
+            pos: own_fields,
+            options,
+            used: 0,
+        };
+        let list = presentation(&mut c, profile, major, depth + 1, true);
+        examined = c.used;
+        if matches!(
+            list,
+            Err(ComplexError::Limit(Error::ResourceLimit {
+                name: "max_records",
+                ..
+            }))
+        ) {
+            // A framed list larger than the remaining budget: charging one item
+            // more than the budget makes the caller report the limit.
+            return none(options.max_records.saturating_add(1));
+        }
+        if let Ok((presentation_records, presentation_span)) = list {
+            if !presentation_records.is_empty() {
+                let unresolved_semantics_span = SourceSpan {
+                    offset: c.pos as u64,
+                    length: (end - c.pos) as u64,
+                };
+                return CachedDisplayAttempt {
+                    entity: Some(CachedDisplayEntity {
+                        attributes,
+                        geometry: CachedDisplayGeometry {
+                            source: CachedDisplaySource::Body,
+                            presentation_records,
+                            presentation_span,
+                            unresolved_semantics_span,
+                            span: own_span,
+                        },
+                    }),
+                    budget_used: examined,
+                };
+            }
+        }
+    }
+    let Some(cache) = header
+        .extension
+        .as_ref()
+        .map(|extension| &extension.display_cache)
+        .filter(|cache| !cache.records.is_empty())
+    else {
+        return none(examined);
+    };
+    // The cache lies behind the body; its records were framed with the stream.
+    let mut c = Cursor {
+        data,
+        pos: 0,
+        options: ParseOptions {
+            max_records: options.max_records.saturating_sub(examined),
+            ..options
+        },
+        used: 0,
+    };
+    let mut presentation_records = Vec::new();
+    for child in &cache.records {
+        match presentation_record(&mut c, child.clone(), profile, major, depth + 1, true) {
+            Ok(record) => presentation_records.push(record),
+            // Only a resource limit ends this loop. What was examined is charged, so
+            // an exhausted record budget is reported by the caller.
+            Err(_) => return none(examined.saturating_add(c.used)),
+        }
+    }
+    CachedDisplayAttempt {
+        entity: Some(CachedDisplayEntity {
+            attributes,
+            geometry: CachedDisplayGeometry {
+                source: CachedDisplaySource::DisplayCache,
+                presentation_records,
+                presentation_span: cache.span.clone(),
+                unresolved_semantics_span: own_span.clone(),
+                span: own_span,
+            },
+        }),
+        budget_used: examined.saturating_add(c.used),
+    }
 }
 
 pub(crate) fn decode_complex(
@@ -359,17 +570,27 @@ pub(crate) fn decode_complex(
         };
         let geometry = if header.type_id == NURBS {
             let s = c.pos;
-            // Save major >= 15 stores a fit-point section before the curve: an i32
-            // fit-point count and an f64 fit tolerance (0.1 on every field record).
-            // Only the empty section (count -1) is qualified: all 21,853 standalone
-            // NURBS of builds 15.0–17.0 seen in 2026-10 carry it, followed by the
-            // build 10/11 layout (the plane's offset is then a signed zero).
+            // Save major >= 15 stores a fit-point section before the curve: a list
+            // of (i32 index, point) entries with ascending indexes from zero, ended
+            // by the index -1, then an f64 fit tolerance. Most records store the
+            // empty list (the lone -1), followed by the build 10/11 layout (the
+            // plane's offset is then a signed zero).
+            let mut fit_points = Vec::new();
             let (fit_point_count_raw, fit_tolerance) = if major >= 15 {
-                let count = c.u()? as i32;
-                if count != -1 {
-                    return Err("NURBS fit points for save major >=15 are not qualified.".into());
+                loop {
+                    let index = c.u()? as i32;
+                    if index == -1 {
+                        break (Some(index), Some(c.f()?));
+                    }
+                    if index < 0 || index as usize != fit_points.len() {
+                        return Err(
+                            "NURBS fit-point indexes for save major >=15 are not sequential."
+                                .into(),
+                        );
+                    }
+                    c.budget(1)?;
+                    fit_points.push(c.v()?);
                 }
-                (Some(count), Some(c.f()?))
             } else {
                 (None, None)
             };
@@ -393,6 +614,7 @@ pub(crate) fn decode_complex(
                 knots,
                 fit_point_count_raw,
                 fit_tolerance,
+                fit_points,
                 span: c.span(s),
             })
         } else if header.type_id == ELLIPSE {
@@ -909,7 +1131,7 @@ pub(crate) fn decode_presentation(
         options,
         used: 0,
     };
-    let (records, span) = presentation(&mut c, profile, major, depth)?;
+    let (records, span) = presentation(&mut c, profile, major, depth, false)?;
     Ok((records, span, c.used))
 }
 fn presentation(
@@ -917,9 +1139,15 @@ fn presentation(
     profile: RecordProfile,
     major: u32,
     depth: u64,
+    nested: bool,
 ) -> Result<(Vec<PresentationRecord>, SourceSpan), ComplexError> {
     let start = c.pos;
     let count = c.u()?;
+    // A record is at least its 26-byte header and a length word: a larger count is
+    // a layout mismatch, reported as unsupported rather than as budget exhaustion.
+    if u64::from(count) > (c.data.len() - c.pos) as u64 / 30 {
+        return Err("Counted display records exceed the remaining body.".into());
+    }
     ParseOptions::check_limit(
         "max_records",
         c.used.saturating_add(u64::from(count)),
@@ -943,54 +1171,87 @@ fn presentation(
         })?;
         c.pos = usize::try_from(h.span.offset + h.span.length)
             .map_err(|_| "Presentation offset overflow.")?;
-        let mut attributes = None;
-        let mut geometry = None;
-        let mut unsupported_reason = None;
-        let remaining = ParseOptions {
-            max_records: c.options.max_records.saturating_sub(c.used),
-            ..c.options
-        };
-        if let Some(r) = decode_primitive(c.data, &h, profile) {
-            match r {
-                Ok(e) => {
-                    attributes = Some(e.attributes);
-                    geometry = Some(PresentationGeometry::Primitive(e.geometry))
-                }
-                Err(s) => unsupported_reason = Some(s),
-            }
-        } else if let Some(r) = decode_annotation(c.data, &h, profile, major, remaining) {
-            match r {
-                Ok(e) => {
-                    c.budget(e.budget_used)?;
-                    attributes = Some(e.attributes);
-                    geometry = Some(PresentationGeometry::Annotation(e.geometry))
-                }
-                Err(AnnotationError::Limit(e)) => return Err(ComplexError::Limit(e)),
-                Err(AnnotationError::Unsupported(s)) => unsupported_reason = Some(s),
-            }
-        } else if h.type_id == SOLID {
-            match decode_complex(c.data, &h, profile, major, remaining).unwrap() {
-                Ok(e) => {
-                    c.budget(e.budget_used)?;
-                    attributes = Some(e.attributes);
-                    if let ComplexGeometry::Solid(s) = e.geometry {
-                        geometry = Some(PresentationGeometry::Solid(s))
-                    }
-                }
-                Err(ComplexError::Limit(e)) => return Err(ComplexError::Limit(e)),
-                Err(ComplexError::Unsupported(s)) => unsupported_reason = Some(s),
-            }
-        } else {
-            unsupported_reason = Some("Unsupported native presentation record class.".into())
-        }
-        presentation_records.push(PresentationRecord {
-            header: h,
-            attributes,
-            geometry,
-            unsupported_reason,
-        });
+        presentation_records.push(presentation_record(c, h, profile, major, depth, nested)?);
     }
     Ok((presentation_records, c.span(start)))
+}
+/// Decode one framed display record. `nested` also reads a record of another
+/// class through its own cached display (the items of a table or a part number).
+fn presentation_record(
+    c: &mut Cursor<'_>,
+    h: RecordHeader,
+    profile: RecordProfile,
+    major: u32,
+    depth: u64,
+    nested: bool,
+) -> Result<PresentationRecord, ComplexError> {
+    let mut attributes = None;
+    let mut geometry = None;
+    let mut unsupported_reason = None;
+    let remaining = ParseOptions {
+        max_records: c.options.max_records.saturating_sub(c.used),
+        ..c.options
+    };
+    if let Some(r) = decode_primitive(c.data, &h, profile) {
+        match r {
+            Ok(e) => {
+                attributes = Some(e.attributes);
+                geometry = Some(PresentationGeometry::Primitive(e.geometry))
+            }
+            Err(s) => unsupported_reason = Some(s),
+        }
+    } else if let Some(r) = decode_annotation(c.data, &h, profile, major, remaining) {
+        match r {
+            Ok(e) => {
+                c.budget(e.budget_used)?;
+                attributes = Some(e.attributes);
+                geometry = Some(PresentationGeometry::Annotation(e.geometry))
+            }
+            Err(AnnotationError::Limit(e)) => return Err(ComplexError::Limit(e)),
+            Err(AnnotationError::Unsupported(s)) => unsupported_reason = Some(s),
+        }
+    } else if h.type_id == SOLID {
+        match decode_complex(c.data, &h, profile, major, remaining).unwrap() {
+            Ok(e) => {
+                c.budget(e.budget_used)?;
+                attributes = Some(e.attributes);
+                if let ComplexGeometry::Solid(s) = e.geometry {
+                    geometry = Some(PresentationGeometry::Solid(s))
+                }
+            }
+            Err(ComplexError::Limit(e)) => return Err(ComplexError::Limit(e)),
+            Err(ComplexError::Unsupported(s)) => unsupported_reason = Some(s),
+        }
+    } else if let Some(r) =
+        crate::context::decode_insert_for_major(c.data, &h, profile, major, remaining)
+    {
+        match r {
+            Ok(e) => {
+                c.budget(e.budget_used)?;
+                attributes = Some(e.attributes);
+                geometry = Some(PresentationGeometry::Insert(Box::new(e.geometry)))
+            }
+            Err(crate::InsertError::Limit(e)) => return Err(ComplexError::Limit(e)),
+            Err(crate::InsertError::Unsupported(s)) => unsupported_reason = Some(s),
+        }
+    } else {
+        unsupported_reason = Some("Unsupported native presentation record class.".into());
+        if nested {
+            let attempt = decode_cached_display(c.data, &h, profile, major, remaining, depth);
+            c.budget(attempt.budget_used)?;
+            if let Some(e) = attempt.entity {
+                attributes = Some(e.attributes);
+                geometry = Some(PresentationGeometry::CachedDisplay(Box::new(e.geometry)));
+                unsupported_reason = None;
+            }
+        }
+    }
+    Ok(PresentationRecord {
+        header: h,
+        attributes,
+        geometry,
+        unsupported_reason,
+    })
 }
 fn dimension(
     c: &mut Cursor<'_>,
@@ -999,7 +1260,7 @@ fn dimension(
     major: u32,
 ) -> Result<DimensionGeometry, ComplexError> {
     let start = c.pos;
-    let (presentation_records, presentation_span) = presentation(c, profile, major, 1)?;
+    let (presentation_records, presentation_span) = presentation(c, profile, major, 1, false)?;
     let value_stored = c.f()?;
     let mut text_fields_stored = vec![c.text()?, c.text()?];
     let flag1 = c.u()?;
@@ -1048,7 +1309,7 @@ fn symbol(
         return Err("Unsupported engineering-symbol save-version profile.".into());
     }
     let start = c.pos;
-    let (presentation_records, presentation_span) = presentation(c, profile, major, 1)?;
+    let (presentation_records, presentation_span) = presentation(c, profile, major, 1, false)?;
     let data_start = c.pos;
     let (data, minimum_tail) = match header.type_id.as_str() {
         ROUGHNESS => (
@@ -1390,6 +1651,391 @@ mod tests {
         let mut b = body();
         b[69..77].copy_from_slice(&f64::NAN.to_le_bytes());
         assert!(decode(&b, SOLID, ParseOptions::default()).is_err())
+    }
+    const UNKNOWN_CLASS: &str = "5a17c0de-0000-4000-8000-00000000c1a5";
+    const UNKNOWN_ITEM: &str = "5a17c0de-0000-4000-8000-0000000017e3";
+    const LINE: &str = "17ecf72d-c046-4e9a-8416-fd8220fd33b5";
+    const INSERT: &str = "d38b4eba-a81f-4b28-aa19-71a60d884004";
+    fn record(kind: &str, id: u32, payload: &[u8]) -> Vec<u8> {
+        let mut b = uuid::Uuid::parse_str(kind).unwrap().to_bytes_le().to_vec();
+        u(&mut b, id);
+        u(&mut b, 0);
+        b.extend_from_slice(&[1, 0]);
+        u(&mut b, payload.len() as u32);
+        b.extend_from_slice(payload);
+        b
+    }
+    fn line_record(id: u32, values: [f64; 4]) -> Vec<u8> {
+        let mut body = attrs();
+        for v in [values[0], values[1], 0., values[2], values[3], 0.] {
+            f(&mut body, v);
+        }
+        record(LINE, id, &body)
+    }
+    /// A plain block reference record of save major 10 (no clip fields).
+    fn insert_record(id: u32, block: i32, at: [f64; 2]) -> Vec<u8> {
+        let mut body = attrs();
+        u(&mut body, 0);
+        for v in [0., 1., 1., 1., at[0], at[1], 0.] {
+            f(&mut body, v);
+        }
+        for v in [
+            1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., at[0], at[1], 0., 1.,
+        ] {
+            f(&mut body, v);
+        }
+        u(&mut body, 0x0080_0000);
+        u(&mut body, block as u32);
+        u(&mut body, 0);
+        u(&mut body, 0);
+        body.extend_from_slice(&[0, 0]);
+        record(INSERT, id, &body)
+    }
+    fn dimension_tail(b: &mut Vec<u8>) {
+        f(b, 12.5);
+        for _ in 0..2 {
+            u(b, 2);
+            b.extend_from_slice(&[0, 0])
+        }
+        u(b, 0);
+        for _ in 0..3 {
+            u(b, 2);
+            b.extend_from_slice(&[0, 0])
+        }
+        f(b, 1.);
+        u(b, 0);
+        u(b, 0);
+        for _ in 0..9 {
+            f(b, 0.)
+        }
+    }
+    #[test]
+    fn dimension_presentation_reads_cached_block_references() {
+        // A dimension whose arrowheads are block references: one line and two
+        // cached INSERT records.
+        let mut b = attrs();
+        u(&mut b, 3);
+        b.extend(line_record(1, [0., 0., 10., 0.]));
+        b.extend(insert_record(2, -60, [0., 0.]));
+        b.extend(insert_record(3, -60, [10., 0.]));
+        dimension_tail(&mut b);
+        let decoded = decode(&b, DIMS[0], ParseOptions::default()).unwrap();
+        let ComplexGeometry::Dimension(d) = decoded.geometry else {
+            panic!()
+        };
+        assert_eq!(d.presentation_records.len(), 3);
+        assert!(d
+            .presentation_records
+            .iter()
+            .all(|r| r.unsupported_reason.is_none()));
+        let Some(PresentationGeometry::Insert(insert)) = &d.presentation_records[2].geometry else {
+            panic!("cached block reference expected")
+        };
+        assert_eq!(insert.block_id, -60);
+        assert_eq!(insert.insertion, [10., 0., 0.]);
+        assert_eq!(insert.matrix_stored[12], 10.);
+        let json = serde_json::to_value(&d.presentation_records[2]).unwrap();
+        assert_eq!(json["geometry"]["category"], "Insert");
+        assert_eq!(json["geometry"]["geometry"]["kind"], "Insert");
+        // A block reference that carries its own display records is not qualified
+        // and stays an explicit unsupported child, as before.
+        let mut odd = attrs();
+        u(&mut odd, 1);
+        let mut child = insert_record(2, -60, [0., 0.]);
+        child[30 + 33..30 + 37].copy_from_slice(&1u32.to_le_bytes());
+        odd.extend(child);
+        dimension_tail(&mut odd);
+        let ComplexGeometry::Dimension(d) = decode(&odd, DIMS[0], ParseOptions::default())
+            .unwrap()
+            .geometry
+        else {
+            panic!()
+        };
+        assert!(d.presentation_records[0].geometry.is_none());
+        assert!(d.presentation_records[0].unsupported_reason.is_some());
+    }
+    fn cached(b: &[u8], kind: &str, major: u32, options: ParseOptions) -> CachedDisplayAttempt {
+        decode_cached_display(
+            b,
+            &header(kind, b.len()),
+            RecordProfile::Schema3Attributes33,
+            major,
+            options,
+            0,
+        )
+    }
+    /// An entity of an unknown class: attributes, two display records (a line and
+    /// an item of another unknown class with one line of its own), three own bytes.
+    fn unknown_entity_body() -> Vec<u8> {
+        let mut item = attrs();
+        item[27..29].copy_from_slice(&u16::MAX.to_le_bytes()); // A hidden item.
+        u(&mut item, 1);
+        item.extend(line_record(4, [5., 5., 6., 6.]));
+        item.extend_from_slice(&7i32.to_le_bytes());
+        let mut b = attrs();
+        u(&mut b, 2);
+        b.extend(line_record(1, [0., 0., 10., 0.]));
+        b.extend(record(UNKNOWN_ITEM, 2, &item));
+        b.extend_from_slice(&[9, 9, 9]);
+        b
+    }
+    #[test]
+    fn cached_display_records_stand_in_for_undecoded_fields() {
+        let b = unknown_entity_body();
+        for kind in [UNKNOWN_CLASS, ROUGHNESS, DIMS[0]] {
+            let attempt = cached(&b, kind, 17, ParseOptions::default());
+            let entity = attempt.entity.expect("cached display expected");
+            // Two framed records, the nested list's record, and nothing else.
+            assert_eq!(attempt.budget_used, 3, "{kind}");
+            let display = entity.geometry;
+            assert_eq!(display.source, CachedDisplaySource::Body);
+            assert_eq!(display.presentation_records.len(), 2);
+            assert!(matches!(
+                display.presentation_records[0].geometry,
+                Some(PresentationGeometry::Primitive(PrimitiveGeometry::Line {
+                    end: [10., 0., 0.],
+                    ..
+                }))
+            ));
+            let nested_record = &display.presentation_records[1];
+            assert_eq!(nested_record.header.type_id, UNKNOWN_ITEM);
+            assert_eq!(
+                nested_record.attributes.as_ref().unwrap().hide_flag_raw,
+                u16::MAX
+            );
+            let Some(PresentationGeometry::CachedDisplay(nested)) = &nested_record.geometry else {
+                panic!("nested cached display expected")
+            };
+            assert_eq!(nested.presentation_records.len(), 1);
+            assert_eq!(nested.unresolved_semantics_span.length, 4);
+            assert_eq!(
+                display.unresolved_semantics_span,
+                SourceSpan {
+                    offset: (b.len() - 3) as u64,
+                    length: 3
+                }
+            );
+            assert_eq!(display.span.offset, 33);
+            assert_eq!(
+                display.presentation_span.offset + display.presentation_span.length,
+                (b.len() - 3) as u64
+            );
+            let json = serde_json::to_value(&display).unwrap();
+            assert_eq!(json["kind"], "CachedDisplay");
+            assert_eq!(json["source"], "body");
+            assert_eq!(
+                json["presentation_records"][1]["geometry"]["category"],
+                "CachedDisplay"
+            );
+        }
+        // The symbol's own decoder still refuses the unqualified save version:
+        // the cached display is a stand-in, not a qualification of its fields.
+        assert!(decode_complex(
+            &b,
+            &header(ROUGHNESS, b.len()),
+            RecordProfile::Schema3Attributes33,
+            17,
+            ParseOptions::default()
+        )
+        .unwrap()
+        .is_err());
+        // Classes with a qualified layout of their own are never retried.
+        for kind in [LINE, SOLID, HATCH, NURBS, INSERT] {
+            let attempt = cached(&b, kind, 17, ParseOptions::default());
+            assert!(
+                attempt.entity.is_none() && attempt.budget_used == 0,
+                "{kind}"
+            );
+        }
+        // Save versions outside the attribute profiles have no qualified framing.
+        for major in [9, 18, 19] {
+            assert!(cached(&b, UNKNOWN_CLASS, major, ParseOptions::default())
+                .entity
+                .is_none());
+        }
+    }
+    #[test]
+    fn bytes_that_are_not_a_record_list_are_an_absent_cached_display() {
+        let b = unknown_entity_body();
+        // Every truncation of the list is "no list", never a read error.
+        for end in 0..b.len() - 3 {
+            let attempt = cached(&b[..end], UNKNOWN_CLASS, 10, ParseOptions::default());
+            assert!(attempt.entity.is_none(), "{end}");
+            assert!(attempt.budget_used <= 3, "{end}");
+        }
+        // A count no body can hold, a coordinate where a count would be, an empty
+        // list, an unknown schema pair and a bad child length are all "no list".
+        let mut huge = b.clone();
+        huge[33..37].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut coordinate = attrs();
+        for v in [1234.5, -20., 0., 1., 0., 0.] {
+            f(&mut coordinate, v);
+        }
+        let mut empty = attrs();
+        u(&mut empty, 0);
+        empty.extend_from_slice(&[0; 40]);
+        let mut schema = b.clone();
+        schema[37 + 24] = 7;
+        let mut length = b.clone();
+        length[37 + 26..37 + 30].copy_from_slice(&5000u32.to_le_bytes());
+        for (label, body) in [
+            ("huge", &huge),
+            ("coordinate", &coordinate),
+            ("empty", &empty),
+            ("schema", &schema),
+            ("length", &length),
+        ] {
+            let attempt = cached(body, UNKNOWN_CLASS, 10, ParseOptions::default());
+            assert!(attempt.entity.is_none(), "{label}");
+            assert!(attempt.budget_used <= 1, "{label}");
+        }
+        // A child that frames but does not decode keeps its reason and its place.
+        let mut skewed = b.clone();
+        let x_axis = 37 + 30 + 33;
+        skewed[x_axis + 16..x_axis + 24].copy_from_slice(&f64::NAN.to_le_bytes());
+        let display = cached(&skewed, UNKNOWN_CLASS, 10, ParseOptions::default())
+            .entity
+            .unwrap()
+            .geometry;
+        assert!(display.presentation_records[0].geometry.is_none());
+        assert!(display.presentation_records[0].unsupported_reason.is_some());
+        assert!(display.presentation_records[1].geometry.is_some());
+        // The cumulative limit: a list larger than the budget reports one item
+        // more than the budget, so the caller's charge is the limit error.
+        for max_records in [0, 1, 2] {
+            let options = ParseOptions {
+                max_records,
+                ..ParseOptions::default()
+            };
+            let attempt = cached(&b, UNKNOWN_CLASS, 10, options);
+            assert!(attempt.entity.is_none());
+            assert!(attempt.budget_used > max_records, "{max_records}");
+        }
+        let options = ParseOptions {
+            max_records: 3,
+            ..ParseOptions::default()
+        };
+        assert!(cached(&b, UNKNOWN_CLASS, 10, options).entity.is_some());
+        // Nesting shares the record depth limit: a list below it is not read, so
+        // the item stays an explicit unsupported child and depth zero has no list.
+        let options = ParseOptions {
+            max_record_depth: 1,
+            ..ParseOptions::default()
+        };
+        let display = cached(&b, UNKNOWN_CLASS, 10, options)
+            .entity
+            .unwrap()
+            .geometry;
+        assert!(display.presentation_records[0].geometry.is_some());
+        assert!(display.presentation_records[1].geometry.is_none());
+        assert!(display.presentation_records[1].unsupported_reason.is_some());
+        let options = ParseOptions {
+            max_record_depth: 0,
+            ..ParseOptions::default()
+        };
+        assert!(cached(&b, UNKNOWN_CLASS, 10, options).entity.is_none());
+    }
+    #[test]
+    fn display_cache_of_a_record_without_an_attribute_prefix() {
+        // A block-reference array: the body opens with its own fields, and the
+        // attribute block and one cached INSERT follow in the schema-3 extension.
+        let mut own_fields = Vec::new();
+        for v in [0., 1., 1., 1., 40., 50., 0.] {
+            f(&mut own_fields, v);
+        }
+        own_fields.extend_from_slice(&[0x5a; 20]);
+        let mut attributes = attrs();
+        attributes[4..8].copy_from_slice(&(-24i32).to_le_bytes());
+        let mut bytes = uuid::Uuid::parse_str(UNKNOWN_CLASS)
+            .unwrap()
+            .to_bytes_le()
+            .to_vec();
+        u(&mut bytes, 17);
+        u(&mut bytes, 0);
+        bytes.extend_from_slice(&3u16.to_le_bytes());
+        u(&mut bytes, own_fields.len() as u32);
+        bytes.extend_from_slice(&own_fields);
+        bytes.extend_from_slice(
+            &uuid::Uuid::parse_str("0fbb54e7-fc10-4b09-9499-924097c3bf94")
+                .unwrap()
+                .to_bytes_le(),
+        );
+        u(&mut bytes, 0);
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        u(&mut bytes, 1);
+        u(&mut bytes, 0xf000_fe00);
+        bytes.extend_from_slice(&attributes);
+        bytes.push(1);
+        bytes.extend_from_slice(
+            &uuid::Uuid::parse_str("0045f336-69f0-4e1a-b117-6f062840b2ab")
+                .unwrap()
+                .to_bytes_le(),
+        );
+        u(&mut bytes, 1);
+        bytes.extend(insert_record(0, -60, [40., 50.]));
+        bytes.push(0);
+        let mut used = 0;
+        let h = embedded_record(
+            &bytes,
+            0,
+            bytes.len(),
+            ParseOptions::default(),
+            &mut used,
+            RecordProfile::Schema3Attributes33,
+            0,
+        )
+        .ok()
+        .expect("extension-only attributes frame");
+        assert!(!crate::records::body_starts_with_attributes(&bytes, &h));
+        let attempt = decode_cached_display(
+            &bytes,
+            &h,
+            RecordProfile::Schema3Attributes33,
+            10,
+            ParseOptions::default(),
+            0,
+        );
+        let entity = attempt.entity.expect("display cache expected");
+        assert_eq!(entity.attributes.layer_id_raw, -24);
+        assert_eq!(
+            entity.attributes.span,
+            h.extension.as_ref().unwrap().attributes_span
+        );
+        let display = entity.geometry;
+        assert_eq!(display.source, CachedDisplaySource::DisplayCache);
+        assert_eq!(display.span, h.payload_span);
+        assert_eq!(display.unresolved_semantics_span, h.payload_span);
+        assert_eq!(
+            display.presentation_span,
+            h.extension.as_ref().unwrap().display_cache.span
+        );
+        let Some(PresentationGeometry::Insert(insert)) = &display.presentation_records[0].geometry
+        else {
+            panic!("cached block reference expected")
+        };
+        assert_eq!((insert.block_id, insert.insertion), (-60, [40., 50., 0.]));
+        assert_eq!(
+            serde_json::to_value(&display).unwrap()["source"],
+            "display_cache"
+        );
+        // Without the cache there is nothing to stand in for the fields.
+        let mut bare = h.clone();
+        bare.extension
+            .as_mut()
+            .unwrap()
+            .display_cache
+            .records
+            .clear();
+        assert!(decode_cached_display(
+            &bytes,
+            &bare,
+            RecordProfile::Schema3Attributes33,
+            10,
+            ParseOptions::default(),
+            0
+        )
+        .entity
+        .is_none());
     }
     #[test]
     fn dimension_keeps_semantics_and_presentation_distinct() {
@@ -1872,10 +2518,72 @@ mod tests {
         for end in 0..b.len() {
             assert!(at(&b[..end], 15).is_err(), "{end}");
         }
-        // A stored fit-point list is not qualified; build 11 has no section at all.
-        b[33..37].copy_from_slice(&0u32.to_le_bytes());
-        let error = at(&b, 15).unwrap_err();
-        assert!(format!("{error:?}").contains("fit points"), "{error:?}");
+        // A stored fit-point list: (index, point) entries from zero, ended by -1.
+        let curve = b[45..].to_vec();
+        let mut fitted = attrs();
+        for (index, point) in [[0., 0., 0.], [1., 2., 0.], [2., 3., 0.]]
+            .iter()
+            .enumerate()
+        {
+            u(&mut fitted, index as u32);
+            for v in point {
+                f(&mut fitted, *v);
+            }
+        }
+        u(&mut fitted, u32::MAX);
+        f(&mut fitted, 1e-10);
+        fitted.extend_from_slice(&curve);
+        for major in [15, 17] {
+            let decoded = at(&fitted, major).unwrap();
+            assert_eq!(decoded.budget_used, 2 + 4 + 3, "curve items and fit points");
+            let ComplexGeometry::Nurbs(n) = decoded.geometry else {
+                panic!()
+            };
+            assert_eq!(n.fit_points, vec![[0., 0., 0.], [1., 2., 0.], [2., 3., 0.]]);
+            assert_eq!(n.fit_point_count_raw, Some(-1));
+            assert_eq!(n.fit_tolerance, Some(1e-10));
+            assert_eq!(n.control_points, vec![[0., 0., 0., 1.], [2., 3., 0., 1.]]);
+            assert_eq!(n.span.length, (fitted.len() - 33) as u64);
+            let json = serde_json::to_value(&n).unwrap();
+            assert_eq!(json["fit_points"][1], serde_json::json!([1., 2., 0.]));
+        }
+        for end in 0..fitted.len() {
+            assert!(at(&fitted[..end], 15).is_err(), "{end}");
+        }
+        // The empty list is not serialized, so earlier consumers see no new field.
+        let ComplexGeometry::Nurbs(empty) = at(&b, 15).unwrap().geometry else {
+            panic!()
+        };
+        assert!(empty.fit_points.is_empty());
+        assert!(serde_json::to_value(&empty)
+            .unwrap()
+            .get("fit_points")
+            .is_none());
+        // Indexes must run 0, 1, 2, ...: anything else is another layout.
+        for (offset, index) in [(33, 1u32), (33 + 28, 5), (33 + 28, 0), (33, 0xffff_fffe)] {
+            let mut bad = fitted.clone();
+            bad[offset..offset + 4].copy_from_slice(&index.to_le_bytes());
+            let error = at(&bad, 15).unwrap_err();
+            assert!(
+                format!("{error:?}").contains("not sequential"),
+                "{offset} {error:?}"
+            );
+        }
+        let tiny = ParseOptions {
+            max_records: 2,
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            decode_complex(
+                &fitted,
+                &header(NURBS, fitted.len()),
+                RecordProfile::Schema3Attributes33,
+                15,
+                tiny
+            )
+            .unwrap(),
+            Err(ComplexError::Limit(_))
+        ));
         let ComplexGeometry::Nurbs(n) = decode(&attrs_nurbs_11(), NURBS, ParseOptions::default())
             .unwrap()
             .geometry

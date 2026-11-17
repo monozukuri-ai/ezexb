@@ -350,3 +350,335 @@ fn bom_presentation_visibility_and_table_placement_are_not_applied_twice() {
     let after = render_svg(&table_doc, -7, options).unwrap();
     assert_eq!(before.svg, after.svg); // Saved presentations are already placed.
 }
+
+use crate::remaining_test_fixture::display;
+
+fn entity(doc: &Document, id: i32) -> &Entity {
+    doc.entities
+        .iter()
+        .find(|entity| entity.id == id)
+        .unwrap_or_else(|| panic!("entity {id}"))
+}
+fn codes_for(doc: &Document, id: i32) -> Vec<&str> {
+    doc.report
+        .diagnostics
+        .iter()
+        .filter(|d| d.record_id == Some(id))
+        .map(|d| d.code.as_str())
+        .collect()
+}
+
+#[test]
+fn records_with_cached_display_are_entities_and_the_rest_stays_unsupported() {
+    for major in [10, 16, 18] {
+        let bytes = display::fixture(major);
+        let doc = read_bytes(&bytes, ParseOptions::default(), false).unwrap();
+        let base = read_bytes(&fixture::fixture(major), ParseOptions::default(), true).unwrap();
+        let added = if major > 10 { 11 } else { 8 };
+        assert_eq!(doc.entities.len(), base.entities.len() + added, "{major}");
+        assert_eq!(doc.report.decoded_entity_count, doc.entities.len() as u64);
+        // Only the record without any display records is counted as unsupported.
+        assert_eq!(doc.report.unsupported_entity_count, 1);
+        let unsupported: Vec<_> = doc
+            .report
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "unsupported_entity")
+            .collect();
+        assert_eq!(unsupported.len(), 1);
+        assert_eq!(unsupported[0].record_id, Some(display::BARE_UNKNOWN));
+        assert_eq!(
+            unsupported[0].type_id.as_deref(),
+            Some(display::UNKNOWN_BARE)
+        );
+        assert!(doc.entities.iter().all(|e| e.id != display::BARE_UNKNOWN));
+        // The entities read before stay exactly as they were.
+        for (before, after) in base.entities.iter().zip(&doc.entities) {
+            assert_eq!(
+                serde_json::to_value(before).unwrap(),
+                serde_json::to_value(after).unwrap()
+            );
+        }
+
+        // An unknown class is kept through the display records that open its body.
+        let unknown = entity(&doc, display::UNKNOWN_ENTITY);
+        assert_eq!(unknown.type_id, display::UNKNOWN_CLASS);
+        assert_eq!(unknown.block_id, Some(-5));
+        assert_eq!(unknown.attributes.layer_id_raw, -24);
+        assert_eq!(unknown.style.layer_name.as_deref(), Some("Test layer"));
+        let Geometry::CachedDisplay(shown) = &unknown.geometry else {
+            panic!("cached display expected")
+        };
+        assert_eq!(shown.source, CachedDisplaySource::Body);
+        assert_eq!(shown.presentation_records.len(), 3);
+        assert_eq!(shown.unresolved_semantics_span.length, 11);
+        assert!(matches!(
+            shown.presentation_records[0].geometry,
+            Some(PresentationGeometry::Primitive(PrimitiveGeometry::Line {
+                start: [80., 0., 0.],
+                end: [90., 0., 0.]
+            }))
+        ));
+        let Some(PresentationGeometry::Annotation(AnnotationGeometry::Text(text))) =
+            &shown.presentation_records[1].geometry
+        else {
+            panic!("cached text expected")
+        };
+        assert_eq!(text.contents, "Original Ω");
+        let item = &shown.presentation_records[2];
+        assert_eq!(item.header.type_id, display::UNKNOWN_ITEM);
+        assert_eq!(item.attributes.as_ref().unwrap().hide_flag_raw, u16::MAX);
+        let Some(PresentationGeometry::CachedDisplay(nested)) = &item.geometry else {
+            panic!("nested cached display expected")
+        };
+        assert_eq!(nested.presentation_records.len(), 2);
+        assert_eq!(nested.unresolved_semantics_span.length, 4);
+        assert_eq!(
+            codes_for(&doc, display::UNKNOWN_ENTITY),
+            ["unsupported_entity_semantics"]
+        );
+        let note = doc
+            .report
+            .diagnostics
+            .iter()
+            .find(|d| d.record_id == Some(display::UNKNOWN_ENTITY))
+            .unwrap();
+        assert!(note.message.contains("Unsupported entity type"));
+        assert_eq!(note.span.as_ref(), Some(&shown.unresolved_semantics_span));
+
+        // A class that keeps its attributes in the schema-3 extension is framed,
+        // and shown through the block reference in its display cache.
+        let array = entity(&doc, display::ARRAY);
+        assert_eq!(array.object_schema, 3);
+        assert_eq!(array.attributes.layer_id_raw, -24);
+        let Geometry::CachedDisplay(shown) = &array.geometry else {
+            panic!("cached display expected")
+        };
+        assert_eq!(shown.source, CachedDisplaySource::DisplayCache);
+        let Some(PresentationGeometry::Insert(insert)) = &shown.presentation_records[0].geometry
+        else {
+            panic!("cached block reference expected")
+        };
+        assert_eq!((insert.block_id, insert.insertion), (-60, [40., 50., 0.]));
+        assert_eq!(
+            codes_for(&doc, display::ARRAY),
+            ["unsupported_entity_semantics"]
+        );
+        // Records behind it are framed as well: nothing is left unparsed.
+        assert!(doc
+            .report
+            .diagnostics
+            .iter()
+            .all(|d| d.code != "unframed_records"));
+
+        // Block arrowheads of a dimension are cached block references.
+        let Geometry::Complex(ComplexGeometry::Dimension(dimension)) =
+            &entity(&doc, display::BLOCK_ARROW_DIMENSION).geometry
+        else {
+            panic!("dimension expected")
+        };
+        assert_eq!(dimension.value_stored, 10.);
+        assert!(matches!(
+            dimension.presentation_records[1].geometry,
+            Some(PresentationGeometry::Insert(_))
+        ));
+        assert_eq!(
+            codes_for(&doc, display::BLOCK_ARROW_DIMENSION),
+            ["unsupported_dimension_semantics"]
+        );
+        let Geometry::Complex(ComplexGeometry::Dimension(angle)) =
+            &entity(&doc, display::THREE_POINT_ANGLE_ID).geometry
+        else {
+            panic!("three-point angle dimension expected")
+        };
+        assert_eq!(angle.value_stored, std::f64::consts::FRAC_PI_4);
+        assert_eq!(angle.presentation_records.len(), 2);
+        assert_eq!(angle.unresolved_semantics_span.length, 24);
+
+        // Circular primitives with a non-orthonormal stored basis.
+        let Geometry::Primitive(PrimitiveGeometry::Arc {
+            radius,
+            x_axis,
+            y_axis,
+            start,
+            end,
+            stored_axes,
+            ..
+        }) = &entity(&doc, display::SCALED_ARC).geometry
+        else {
+            panic!("arc expected")
+        };
+        assert_eq!(
+            (*radius, *x_axis, *y_axis),
+            (5., [1., 0., 0.], [0., 1., 0.])
+        );
+        assert_eq!(*start, [35., 40., 0.]);
+        assert!((end[0] - 30.).abs() < 1e-12 && (end[1] - 45.).abs() < 1e-12);
+        assert_eq!(*stored_axes, Some([[2., 0., 0.], [0., 2., 0.]]));
+        assert_eq!(
+            codes_for(&doc, display::SCALED_ARC),
+            ["nonorthonormal_circular_basis"]
+        );
+        assert!(matches!(
+            entity(&doc, display::SKEWED_CIRCLE).geometry,
+            Geometry::Primitive(PrimitiveGeometry::Circle {
+                radius: 4.0,
+                x_axis: [1., 0., 0.],
+                y_axis: [0., 1., 0.],
+                stored_axes: Some(_),
+                ..
+            })
+        ));
+        assert_eq!(
+            codes_for(&doc, display::SKEWED_CIRCLE),
+            ["nonorthonormal_circular_basis"]
+        );
+
+        // A construction line and a line with residue in Z are plain entities.
+        assert!(matches!(
+            entity(&doc, display::XLINE_ID).geometry,
+            Geometry::Primitive(PrimitiveGeometry::Xline {
+                point: [0., 25., 0.],
+                direction: [1., 0., 0.]
+            })
+        ));
+        assert!(codes_for(&doc, display::XLINE_ID).is_empty());
+        assert!(matches!(
+            entity(&doc, display::RESIDUE_LINE).geometry,
+            Geometry::Primitive(PrimitiveGeometry::Line { .. })
+        ));
+        assert!(codes_for(&doc, display::RESIDUE_LINE).is_empty());
+
+        if major > 10 {
+            let Geometry::Annotation(AnnotationGeometry::Polyline(polyline)) =
+                &entity(&doc, display::ZERO_NORMAL_POLYLINE).geometry
+            else {
+                panic!("polyline expected")
+            };
+            assert_eq!(polyline.normal, Some([0.; 3]));
+            assert_eq!(polyline.vertices[2].point, [10., 60.]);
+            assert_eq!(
+                codes_for(&doc, display::ZERO_NORMAL_POLYLINE),
+                ["degenerate_polyline_normal"]
+            );
+            // The symbol's fields are not qualified for this save version.
+            let roughness = entity(&doc, display::UNQUALIFIED_ROUGHNESS);
+            let Geometry::CachedDisplay(shown) = &roughness.geometry else {
+                panic!("cached display expected")
+            };
+            assert_eq!(shown.presentation_records.len(), 4);
+            assert_eq!(shown.unresolved_semantics_span.length, 40);
+            let note = doc
+                .report
+                .diagnostics
+                .iter()
+                .find(|d| d.record_id == Some(display::UNQUALIFIED_ROUGHNESS))
+                .unwrap();
+            assert_eq!(note.code, "unsupported_entity_semantics");
+            assert!(note.message.contains("engineering-symbol save-version"));
+            let Geometry::Complex(ComplexGeometry::Nurbs(nurbs)) =
+                &entity(&doc, display::FITTED_NURBS).geometry
+            else {
+                panic!("NURBS expected")
+            };
+            assert_eq!(nurbs.fit_points.len(), 3);
+            assert_eq!(nurbs.fit_points[1], [5., 75., 0.]);
+            assert_eq!(nurbs.control_points.len(), 4);
+            assert!(codes_for(&doc, display::FITTED_NURBS).is_empty());
+        }
+
+        // Strict reading still refuses the document and keeps the report.
+        let Err(Error::IncompleteRead(report)) = read_bytes(&bytes, ParseOptions::default(), true)
+        else {
+            panic!("strict read must stay incomplete")
+        };
+        assert_eq!(report.unsupported_entity_count, 1);
+        assert_eq!(report.diagnostics.len(), doc.report.diagnostics.len());
+
+        // The world scene and the preview accept the new geometry kinds.
+        let scene = expand_world(&doc, -7, ParseOptions::default()).unwrap();
+        assert!(scene
+            .instances
+            .iter()
+            .any(|i| i.entity_id == display::XLINE_ID && i.geometry.is_none()));
+        let svg = render_svg(&doc, -7, ParseOptions::default()).unwrap();
+        let plain = render_svg(&base, -7, ParseOptions::default()).unwrap();
+        // The unknown entity's line, the array's block (one circle), the two block
+        // arrowheads (one circle each), the dimensions' line, arc and line, the
+        // scaled arc, the circle and the residue line; the hidden item is omitted.
+        // From major 16: two polyline segments and the three roughness lines.
+        let more = if major > 10 { 10 + 2 + 3 } else { 10 };
+        assert_eq!(
+            svg.rendered_curve_count,
+            plain.rendered_curve_count + more,
+            "{major}"
+        );
+    }
+}
+
+#[test]
+fn cached_block_references_are_validated_like_stored_ones() {
+    let bytes = fixture::mutate_stream(&fixture::fixture(16), BLOCK, |data| {
+        data.extend(display::array_record(400, -5, 16, -999));
+        data.extend(fixture::record(
+            401,
+            -60,
+            "1da848b5-8c84-4c11-80d6-45cf9b26aa48",
+            1,
+            &display::block_arrow_dimension_body(16, -60),
+        ));
+    });
+    let doc = read_bytes(&bytes, ParseOptions::default(), false).unwrap();
+    let missing: Vec<_> = doc
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == "unresolved_insert_block")
+        .collect();
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].record_id, Some(400));
+    assert!(missing[0].message.contains("-999"));
+    // A dimension inside block -60 whose arrowhead is block -60 itself.
+    assert!(doc
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "cyclic_block_reference"));
+    // The preview does not follow the cycle and does not fail on the missing block.
+    let svg = render_svg(&doc, -7, ParseOptions::default()).unwrap();
+    assert!(svg
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("unresolved_block") || d.contains("cyclic")));
+}
+
+#[test]
+fn cached_display_lookup_is_charged_to_the_cumulative_budget() {
+    let bytes = display::fixture(16);
+    let complete = read_bytes(&bytes, ParseOptions::default(), false).unwrap();
+    let used = complete.report.budget_used;
+    let exact = ParseOptions {
+        max_records: used,
+        ..ParseOptions::default()
+    };
+    assert_eq!(
+        read_bytes(&bytes, exact, false).unwrap().entities.len(),
+        complete.entities.len()
+    );
+    for max_records in [used - 1, used / 2, 40, 0] {
+        let options = ParseOptions {
+            max_records,
+            ..ParseOptions::default()
+        };
+        assert!(
+            matches!(
+                read_bytes(&bytes, options, false),
+                Err(Error::ResourceLimit {
+                    name: "max_records",
+                    ..
+                })
+            ),
+            "{max_records}"
+        );
+    }
+}

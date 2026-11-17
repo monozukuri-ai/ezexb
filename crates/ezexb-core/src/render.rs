@@ -154,6 +154,7 @@ impl Canvas {
                         sweep_angle: *sweep_angle,
                         start: [0.; 3],
                         end: [0.; 3],
+                        stored_axes: None,
                     }),
                     BoundaryGeometry::Polyline {
                         vertices,
@@ -216,11 +217,13 @@ impl Canvas {
     }
     fn presentation(
         &mut self,
+        document: &Document,
         records: &[PresentationRecord],
         transform: &WorldTransform,
-        styles: &[TextStyle],
         id: i32,
+        active: &mut Vec<i32>,
     ) -> Result<(), Error> {
+        let styles = &document.text_style_context.styles;
         for r in records {
             if r.attributes.as_ref().is_some_and(|a| a.hide_flag_raw != 0) {
                 if r.attributes
@@ -256,13 +259,204 @@ impl Canvas {
                     self.boundary(&s.boundary, transform, id)?
                 }
                 Some(PresentationGeometry::PartItem(item)) => {
-                    self.presentation(&item.presentation_records, transform, styles, id)?
+                    self.presentation(document, &item.presentation_records, transform, id, active)?
+                }
+                Some(PresentationGeometry::CachedDisplay(display)) => self.presentation(
+                    document,
+                    &display.presentation_records,
+                    transform,
+                    id,
+                    active,
+                )?,
+                Some(PresentationGeometry::Insert(insert)) => {
+                    self.cached_insert(document, insert, transform, id, active)?
                 }
                 None => self.diagnostics.push(format!(
                     "Entity {id}: unsupported cached presentation record {}.",
                     r.header.id_raw
                 )),
             }
+        }
+        Ok(())
+    }
+    /// Draw the block a cached display record references. The reference is not a
+    /// stored entity of the space, so it is expanded here, below the owner.
+    fn cached_insert(
+        &mut self,
+        document: &Document,
+        insert: &Insert,
+        transform: &WorldTransform,
+        id: i32,
+        active: &mut Vec<i32>,
+    ) -> Result<(), Error> {
+        if insert.hide_flag_raw != 0 {
+            if insert.hide_flag_raw != u16::MAX {
+                self.diagnostics.push(format!(
+                    "Entity {id}: unknown cached block reference visibility; block omitted."
+                ));
+            }
+            return Ok(());
+        }
+        if insert.clip_flag_raw.is_some_and(|flag| flag != 0) {
+            self.diagnostics.push(format!(
+                "Entity {id}: clipped cached block reference is not expanded."
+            ));
+            return Ok(());
+        }
+        ParseOptions::check_limit(
+            "max_record_depth",
+            active.len() as u64,
+            self.options.max_record_depth.min(64),
+        )?;
+        if active.contains(&insert.block_id) {
+            self.diagnostics.push(format!(
+                "Entity {id}: cached block reference {} is cyclic; block omitted.",
+                insert.block_id
+            ));
+            return Ok(());
+        }
+        let child = match WorldTransform::from_insert(insert).and_then(|t| t.then(transform)) {
+            Ok(child) => child,
+            Err(reason) => {
+                self.diagnostics.push(format!("Entity {id}: {reason}"));
+                return Ok(());
+            }
+        };
+        let remaining = ParseOptions {
+            max_records: self
+                .options
+                .max_records
+                .saturating_sub(self.curves + self.texts),
+            ..self.options
+        };
+        let scene = crate::world::expand_block(document, 0, insert.block_id, &child, remaining)?;
+        for d in &scene.diagnostics {
+            self.diagnostics
+                .push(format!("Entity {id}: {}: {}", d.code, d.message));
+        }
+        active.push(insert.block_id);
+        for instance in &scene.instances {
+            self.instance(document, instance, active)?;
+        }
+        active.pop();
+        Ok(())
+    }
+    fn instance(
+        &mut self,
+        document: &Document,
+        instance: &WorldInstance,
+        active: &mut Vec<i32>,
+    ) -> Result<(), Error> {
+        let c = self;
+        if !instance.visible {
+            return Ok(());
+        }
+        if let Some(geometry) = &instance.geometry {
+            match geometry {
+                WorldGeometry::Curve(curve) => c.curve(curve)?,
+                WorldGeometry::Polyline(p) => {
+                    for segment in &p.segments {
+                        c.curve(&segment.curve)?;
+                    }
+                }
+            }
+        }
+        let entity = &document.entities[instance.entity_index];
+        match &entity.geometry {
+            Geometry::Annotation(AnnotationGeometry::Text(text)) => c.text(
+                text,
+                &instance.transform,
+                &document.text_style_context.styles,
+                entity.id,
+            )?,
+            Geometry::Insert(insert) => {
+                for attribute in &insert.attached_attributes {
+                    // Native Draw pops this INSERT matrix before drawing attached attributes.
+                    // `instance.transform` is the outer container transform.
+                    if attribute.visibility == Some(true)
+                        && attribute.attributes.hide_flag_raw == 0
+                        && attribute.text_attributes.hide_flag_raw == 0
+                    {
+                        c.text(
+                            &attribute.text,
+                            &instance.transform,
+                            &document.text_style_context.styles,
+                            attribute.record.id,
+                        )?;
+                    } else if attribute.visibility.is_none()
+                        || !matches!(attribute.attributes.hide_flag_raw, 0 | u16::MAX)
+                        || !matches!(attribute.text_attributes.hide_flag_raw, 0 | u16::MAX)
+                    {
+                        c.diagnostics.push(format!(
+                            "Attribute {}: visibility unknown; text omitted.",
+                            attribute.record.id
+                        ));
+                    }
+                }
+            }
+            Geometry::Complex(ComplexGeometry::Hatch(h)) => {
+                c.boundary(&h.boundary, &instance.transform, entity.id)?
+            }
+            Geometry::Complex(ComplexGeometry::Solid(s)) => {
+                c.boundary(&s.boundary, &instance.transform, entity.id)?
+            }
+            Geometry::Complex(ComplexGeometry::Dimension(d)) => c.presentation(
+                document,
+                &d.presentation_records,
+                &instance.transform,
+                entity.id,
+                active,
+            )?,
+            Geometry::Complex(ComplexGeometry::Symbol(s)) => c.presentation(
+                document,
+                &s.presentation_records,
+                &instance.transform,
+                entity.id,
+                active,
+            )?,
+            Geometry::PartNumber(p) => c.presentation(
+                document,
+                &p.presentation_records,
+                &instance.transform,
+                entity.id,
+                active,
+            )?,
+            Geometry::Table(table) => c.presentation(
+                document,
+                &table.presentation_records,
+                &instance.transform,
+                entity.id,
+                active,
+            )?,
+            Geometry::CachedDisplay(display) => c.presentation(
+                document,
+                &display.presentation_records,
+                &instance.transform,
+                entity.id,
+                active,
+            )?,
+            Geometry::BomTable(table) => {
+                for item in &table.items {
+                    match item.attributes.hide_flag_raw {
+                        0 => c.presentation(
+                            document,
+                            &item.presentation_records,
+                            &instance.transform,
+                            entity.id,
+                            active,
+                        )?,
+                        u16::MAX => {}
+                        _ => c.diagnostics.push(format!(
+                            "BOM item {}: visibility unknown; presentation omitted.",
+                            item.header.id_raw
+                        )),
+                    }
+                }
+            }
+            Geometry::AttributeDefinition(_) => {
+                c.diagnostics.push(format!("Entity {}: attribute definition display is omitted; attached instance text is handled separately.",entity.id));
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -411,105 +605,9 @@ pub fn render_svg(
     for d in &scene.diagnostics {
         c.diagnostics.push(format!("{}: {}", d.code, d.message));
     }
+    let mut active = Vec::new();
     for instance in &scene.instances {
-        if !instance.visible {
-            continue;
-        }
-        if let Some(geometry) = &instance.geometry {
-            match geometry {
-                WorldGeometry::Curve(curve) => c.curve(curve)?,
-                WorldGeometry::Polyline(p) => {
-                    for segment in &p.segments {
-                        c.curve(&segment.curve)?;
-                    }
-                }
-            }
-        }
-        let entity = &document.entities[instance.entity_index];
-        match &entity.geometry {
-            Geometry::Annotation(AnnotationGeometry::Text(text)) => c.text(
-                text,
-                &instance.transform,
-                &document.text_style_context.styles,
-                entity.id,
-            )?,
-            Geometry::Insert(insert) => {
-                for attribute in &insert.attached_attributes {
-                    // Native Draw pops this INSERT matrix before drawing attached attributes.
-                    // `instance.transform` is the outer container transform.
-                    if attribute.visibility == Some(true)
-                        && attribute.attributes.hide_flag_raw == 0
-                        && attribute.text_attributes.hide_flag_raw == 0
-                    {
-                        c.text(
-                            &attribute.text,
-                            &instance.transform,
-                            &document.text_style_context.styles,
-                            attribute.record.id,
-                        )?;
-                    } else if attribute.visibility.is_none()
-                        || !matches!(attribute.attributes.hide_flag_raw, 0 | u16::MAX)
-                        || !matches!(attribute.text_attributes.hide_flag_raw, 0 | u16::MAX)
-                    {
-                        c.diagnostics.push(format!(
-                            "Attribute {}: visibility unknown; text omitted.",
-                            attribute.record.id
-                        ));
-                    }
-                }
-            }
-            Geometry::Complex(ComplexGeometry::Hatch(h)) => {
-                c.boundary(&h.boundary, &instance.transform, entity.id)?
-            }
-            Geometry::Complex(ComplexGeometry::Solid(s)) => {
-                c.boundary(&s.boundary, &instance.transform, entity.id)?
-            }
-            Geometry::Complex(ComplexGeometry::Dimension(d)) => c.presentation(
-                &d.presentation_records,
-                &instance.transform,
-                &document.text_style_context.styles,
-                entity.id,
-            )?,
-            Geometry::Complex(ComplexGeometry::Symbol(s)) => c.presentation(
-                &s.presentation_records,
-                &instance.transform,
-                &document.text_style_context.styles,
-                entity.id,
-            )?,
-            Geometry::PartNumber(p) => c.presentation(
-                &p.presentation_records,
-                &instance.transform,
-                &document.text_style_context.styles,
-                entity.id,
-            )?,
-            Geometry::Table(table) => c.presentation(
-                &table.presentation_records,
-                &instance.transform,
-                &document.text_style_context.styles,
-                entity.id,
-            )?,
-            Geometry::BomTable(table) => {
-                for item in &table.items {
-                    match item.attributes.hide_flag_raw {
-                        0 => c.presentation(
-                            &item.presentation_records,
-                            &instance.transform,
-                            &document.text_style_context.styles,
-                            entity.id,
-                        )?,
-                        u16::MAX => {}
-                        _ => c.diagnostics.push(format!(
-                            "BOM item {}: visibility unknown; presentation omitted.",
-                            item.header.id_raw
-                        )),
-                    }
-                }
-            }
-            Geometry::AttributeDefinition(_) => {
-                c.diagnostics.push(format!("Entity {}: attribute definition display is omitted; attached instance text is handled separately.",entity.id));
-            }
-            _ => {}
-        }
+        c.instance(document, instance, &mut active)?;
     }
     if !c.bounds[0].is_finite() {
         c.bounds = [0., 0., 1., 1.];

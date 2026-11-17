@@ -73,6 +73,8 @@ pub enum Geometry {
     BomTable(Box<BomTableGeometry>),
     View2D(Box<View2DGeometry>),
     Table(Box<TableGeometry>),
+    /// A record kept only through the display records cached with it.
+    CachedDisplay(Box<CachedDisplayGeometry>),
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Entity {
@@ -209,6 +211,61 @@ fn cached_count(records: &[RecordHeader]) -> u64 {
         })
         .sum()
 }
+const NONORTHONORMAL_BASIS: &str = "Stored circular basis is not orthonormal; the curve is read as the native display draws it: the stored radius, starting along the stored X vector and turning toward the stored Y vector.";
+const ZERO_POLYLINE_NORMAL: &str =
+    "Stored POLYLINE normal is the zero vector; the vertices are read in the XY plane as stored.";
+
+/// Diagnostics for decoded primitive values that differ from a plain stored
+/// curve: a degenerate arc, a re-derived circular basis, a zero polyline normal.
+fn primitive_diagnostics(
+    report: &mut ReadReport,
+    primitive: Option<&PrimitiveGeometry>,
+    annotation: Option<&AnnotationGeometry>,
+    path: &str,
+    span: &SourceSpan,
+    owner: &RecordHeader,
+) {
+    match primitive {
+        Some(PrimitiveGeometry::DegenerateArc { .. }) => issue(
+            report,
+            "degenerate_geometry",
+            "Stored ARC has zero radius and zero basis; no valid curve is inferred.",
+            Some(path),
+            Some(span.clone()),
+            Some(owner),
+        ),
+        Some(
+            PrimitiveGeometry::Arc {
+                stored_axes: Some(_),
+                ..
+            }
+            | PrimitiveGeometry::Circle {
+                stored_axes: Some(_),
+                ..
+            },
+        ) => issue(
+            report,
+            "nonorthonormal_circular_basis",
+            NONORTHONORMAL_BASIS,
+            Some(path),
+            Some(span.clone()),
+            Some(owner),
+        ),
+        _ => {}
+    }
+    if let Some(AnnotationGeometry::Polyline(polyline)) = annotation {
+        if polyline.normal == Some([0.; 3]) {
+            issue(
+                report,
+                "degenerate_polyline_normal",
+                ZERO_POLYLINE_NORMAL,
+                Some(path),
+                Some(span.clone()),
+                Some(owner),
+            );
+        }
+    }
+}
 fn presentation_diagnostics(
     report: &mut ReadReport,
     records: &[PresentationRecord],
@@ -217,20 +274,24 @@ fn presentation_diagnostics(
     code: &str,
 ) {
     for child in records {
-        if matches!(
-            child.geometry,
-            Some(PresentationGeometry::Primitive(
-                PrimitiveGeometry::DegenerateArc { .. }
-            ))
-        ) {
-            issue(
+        match &child.geometry {
+            Some(PresentationGeometry::Primitive(primitive)) => primitive_diagnostics(
                 report,
-                "degenerate_geometry",
-                "Stored ARC has zero radius and zero basis; no valid curve is inferred.",
-                Some(path),
-                Some(child.header.payload_span.clone()),
-                Some(owner),
-            );
+                Some(primitive),
+                None,
+                path,
+                &child.header.payload_span,
+                owner,
+            ),
+            Some(PresentationGeometry::Annotation(annotation)) => primitive_diagnostics(
+                report,
+                None,
+                Some(annotation),
+                path,
+                &child.header.payload_span,
+                owner,
+            ),
+            _ => {}
         }
         if let Some(reason) = &child.unsupported_reason {
             issue(
@@ -242,8 +303,14 @@ fn presentation_diagnostics(
                 Some(owner),
             );
         }
-        if let Some(PresentationGeometry::PartItem(item)) = &child.geometry {
-            presentation_diagnostics(report, &item.presentation_records, path, owner, code);
+        match &child.geometry {
+            Some(PresentationGeometry::PartItem(item)) => {
+                presentation_diagnostics(report, &item.presentation_records, path, owner, code)
+            }
+            Some(PresentationGeometry::CachedDisplay(display)) => {
+                presentation_diagnostics(report, &display.presentation_records, path, owner, code)
+            }
+            _ => {}
         }
     }
 }
@@ -487,7 +554,11 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
                     Some(record),
                 );
             }
-            let decoded = if let Some(result) = decode_primitive(&data, record, profile) {
+            let decoded = if !crate::records::body_starts_with_attributes(&data, record) {
+                // A class that keeps its attribute block only in the schema-3
+                // extension; none of the qualified layouts below is one.
+                Err("Record body does not open with the entity attribute block.".to_string())
+            } else if let Some(result) = decode_primitive(&data, record, profile) {
                 result.map(|entity| (entity.attributes, Geometry::Primitive(entity.geometry), 0))
             } else if let Some(result) =
                 decode_annotation(&data, record, profile, major, budget.remaining())
@@ -588,14 +659,71 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
             } else {
                 Err(format!("Unsupported entity type {}.", record.type_id))
             };
+            // A record whose own fields do not decode may still carry the display
+            // records CAXA cached with it: return those instead of dropping it.
+            let mut undecoded_fields = None;
+            let decoded = match decoded {
+                Err(reason) => {
+                    let attempt = crate::complex::decode_cached_display(
+                        &data,
+                        record,
+                        profile,
+                        major,
+                        budget.remaining(),
+                        0,
+                    );
+                    // Charged even when nothing was found: looking is bounded work.
+                    budget.charge(attempt.budget_used)?;
+                    match attempt.entity {
+                        Some(entity) => {
+                            undecoded_fields = Some(reason);
+                            Ok((
+                                entity.attributes,
+                                Geometry::CachedDisplay(Box::new(entity.geometry)),
+                                0,
+                            ))
+                        }
+                        None => Err(reason),
+                    }
+                }
+                decoded => decoded,
+            };
             match decoded {
                 Ok((attributes, geometry, extra_budget)) => {
                     budget.charge(extra_budget)?;
-                    if matches!(
-                        geometry,
-                        Geometry::Primitive(PrimitiveGeometry::DegenerateArc { .. })
-                    ) {
-                        issue(&mut report, "degenerate_geometry", "Stored ARC has zero radius and zero basis; no valid curve is inferred.", Some(path), Some(record.payload_span.clone()), Some(record));
+                    primitive_diagnostics(
+                        &mut report,
+                        match &geometry {
+                            Geometry::Primitive(primitive) => Some(primitive),
+                            _ => None,
+                        },
+                        match &geometry {
+                            Geometry::Annotation(annotation) => Some(annotation),
+                            _ => None,
+                        },
+                        path,
+                        &record.payload_span,
+                        record,
+                    );
+                    if let Geometry::CachedDisplay(display) = &geometry {
+                        issue(
+                            &mut report,
+                            "unsupported_entity_semantics",
+                            format!(
+                                "The entity's own fields are not decoded ({}); the display records cached with it are returned instead.",
+                                undecoded_fields.as_deref().unwrap_or("unqualified layout")
+                            ),
+                            Some(path),
+                            Some(display.unresolved_semantics_span.clone()),
+                            Some(record),
+                        );
+                        presentation_diagnostics(
+                            &mut report,
+                            &display.presentation_records,
+                            path,
+                            record,
+                            "unsupported_entity_presentation",
+                        );
                     }
                     if let Geometry::Complex(ComplexGeometry::Dimension(dimension)) = &geometry {
                         issue(&mut report, "unsupported_dimension_semantics", "Stored dimension values and cached presentation are decoded; construction, overrides and associativity remain unresolved.", Some(path), Some(dimension.unresolved_semantics_span.clone()), Some(record));
@@ -820,17 +948,63 @@ pub(crate) fn read_container(container: &mut Container, strict: bool) -> Result<
     })
 }
 
+/// Block references among cached display records, at any nesting level.
+fn cached_inserts<'a>(records: &'a [PresentationRecord], found: &mut Vec<&'a Insert>) {
+    for record in records {
+        match &record.geometry {
+            Some(PresentationGeometry::Insert(insert)) => found.push(insert),
+            Some(PresentationGeometry::PartItem(item)) => {
+                cached_inserts(&item.presentation_records, found)
+            }
+            Some(PresentationGeometry::CachedDisplay(display)) => {
+                cached_inserts(&display.presentation_records, found)
+            }
+            _ => {}
+        }
+    }
+}
+
 fn validate_block_references(entities: &[Entity], blocks: &HashSet<i32>, report: &mut ReadReport) {
     let mut adjacency: HashMap<i32, Vec<i32>> = HashMap::new();
     for entity in entities {
-        let reference = match &entity.geometry {
-            Geometry::Insert(insert) => Some((insert, "INSERT", "unresolved_insert_block")),
-            Geometry::View2D(view) => {
-                Some((&view.block_reference, "View2D", "unresolved_view_block"))
+        let mut references = Vec::new();
+        match &entity.geometry {
+            Geometry::Insert(insert) => {
+                references.push((insert, "INSERT", "unresolved_insert_block"))
             }
-            _ => None,
+            Geometry::View2D(view) => {
+                references.push((&view.block_reference, "View2D", "unresolved_view_block"))
+            }
+            _ => {}
         };
-        if let Some((insert, label, code)) = reference {
+        let mut cached = Vec::new();
+        match &entity.geometry {
+            Geometry::Complex(ComplexGeometry::Dimension(dimension)) => {
+                cached_inserts(&dimension.presentation_records, &mut cached)
+            }
+            Geometry::Complex(ComplexGeometry::Symbol(symbol)) => {
+                cached_inserts(&symbol.presentation_records, &mut cached)
+            }
+            Geometry::PartNumber(part) => cached_inserts(&part.presentation_records, &mut cached),
+            Geometry::Table(table) => cached_inserts(&table.presentation_records, &mut cached),
+            Geometry::BomTable(table) => {
+                for item in &table.items {
+                    cached_inserts(&item.presentation_records, &mut cached);
+                }
+            }
+            Geometry::CachedDisplay(display) => {
+                cached_inserts(&display.presentation_records, &mut cached)
+            }
+            _ => {}
+        }
+        references.extend(cached.into_iter().map(|insert| {
+            (
+                insert,
+                "Cached block reference of entity",
+                "unresolved_insert_block",
+            )
+        }));
+        for (insert, label, code) in references {
             if !blocks.contains(&insert.block_id) {
                 report.diagnostics.push(Diagnostic {
                     code: code.into(),

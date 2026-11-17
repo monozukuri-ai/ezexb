@@ -90,3 +90,27 @@ cargo run -p ezexb-core --example make_remaining_fixture -- remaining-18.cfb 18
 The generator refuses overwrites. Tests check typed Rust/Python/CLI fields,
 strict/partial diagnostics, cumulative limits, omitted view expansion and
 single rendering of saved table/BOM presentations.
+
+## Cached-display fixtures
+
+`display-16.cfb` and `display-18.cfb` extend the original stored-document fixtures
+with records that exercise the cached display path and tolerant primitive decoding:
+an entity and an item of synthetic classes no CAD program uses (identifiers
+`5a17c0de-…`), whose bodies open with original LINE/TEXT display records; a
+roughness symbol with an opaque synthetic tail; a schema-3 record that keeps its
+attribute block and one cached block reference in its extension; a linear
+dimension with two block arrowheads; a three-point angle dimension; an ARC and a
+CIRCLE whose stored basis vectors are scaled or skewed; a construction line; a
+LINE with floating-point residue in Z; a POLYLINE with a zero normal; a NURBS with
+three stored fit points; and one record of a synthetic class without any display
+records. All bytes and text are original synthetic data under the project MIT
+license, not CAD-authored exports.
+
+```sh
+cargo run -p ezexb-core --example make_display_fixture -- display-16.cfb 16
+cargo run -p ezexb-core --example make_display_fixture -- display-18.cfb 18
+```
+
+The generator refuses overwrites. Tests check the typed Rust/Python/CLI values,
+the diagnostics that keep strict reading incomplete, block-reference validation,
+the cumulative budget and the preview of cached block references.
